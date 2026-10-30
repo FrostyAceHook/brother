@@ -1,0 +1,39 @@
+#include "sim.h"
+
+#include "assertion.h"
+#include "maths.h"
+#include "optim.h"
+
+#include "n2o.h"
+
+
+
+
+c_IH sim_interpretation_hash(void) {
+    c_IH h = c_ih_initial();
+    #define X(name, type, flags)                                \
+        h = c_ih_append(h, #name, flags | generic(objof(type)   \
+            , f64:  C_F64                                       \
+            , i64:  C_I64                                       \
+            , f32*: C_PTR_F32                                   \
+            , f64*: C_PTR_F64                                   \
+            , i8*:  C_PTR_I8                                    \
+            , i16*: C_PTR_I16                                   \
+            , i32*: C_PTR_I32                                   \
+            , i64*: C_PTR_I64                                   \
+            , u8*:  C_PTR_U8                                    \
+            , u16*: C_PTR_U16                                   \
+            , u32*: C_PTR_U32                                   \
+            , u64*: C_PTR_U64                                   \
+        ));
+    SIM_INTERPRETATION
+    #undef X
+    return h;
+}
+
+
+
+void sim_execute(simState* rstr s) {
+    printf("hi c %f\n", s->x);
+    printf("%f\n", N2O_Psat(298.15));
+}
