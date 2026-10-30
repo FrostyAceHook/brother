@@ -2,8 +2,8 @@
 /* CEA n2o/paraffin (CEA_N2O_PARAFFIN). */
 
 static const ceaGrid_ cea_n2o_paraffin_cc_grid_ = { 2, {
-    { 50000.0, 9000000.0, 30, 1 },
-    { 1.0, 15.0, 351, 0 },
+    { .lo = 50000.0, .hi = 9000000.0, .glo = 15.609640474436812, .ghi = 23.101493570766486, .n = 30, .scale = LUT_LOG, .c = 0.0, },
+    { .lo = 1.0, .hi = 15.0, .glo = 1.0, .ghi = 15.0, .n = 351, .scale = LUT_LIN, .c = 0.0, },
 } };
 static const f32 cea_n2o_paraffin_cc_T_tbl[10530] = {
     +9.70359985e+02f,+9.80919983e+02f,+9.91809998e+02f,+1.00309998e+03f,
@@ -23722,8 +23722,8 @@ static const f32 cea_n2o_paraffin_cc_Mw_tbl[10530] = {
 };
 
 static const ceaGrid_ cea_n2o_paraffin_tht_grid_ = { 2, {
-    { 50000.0, 9000000.0, 30, 1 },
-    { 1.0, 15.0, 351, 0 },
+    { .lo = 50000.0, .hi = 9000000.0, .glo = 15.609640474436812, .ghi = 23.101493570766486, .n = 30, .scale = LUT_LOG, .c = 0.0, },
+    { .lo = 1.0, .hi = 15.0, .glo = 1.0, .ghi = 15.0, .n = 351, .scale = LUT_LIN, .c = 0.0, },
 } };
 static const f32 cea_n2o_paraffin_tht_T_tbl[10530] = {
     +9.19130005e+02f,+9.27710022e+02f,+9.36320007e+02f,+9.45000000e+02f,
@@ -50077,9 +50077,9 @@ static const f32 cea_n2o_paraffin_tht_Ivac_tbl[10530] = {
 };
 
 static const ceaGrid_ cea_n2o_paraffin_sup_grid_ = { 3, {
-    { 50000.0, 9000000.0, 12, 1 },
-    { 1.0, 15.0, 141, 0 },
-    { 1.2, 12.0, 24, 1 },
+    { .lo = 50000.0, .hi = 9000000.0, .glo = 15.609640474436812, .ghi = 23.101493570766486, .n = 12, .scale = LUT_LOG, .c = 0.0, },
+    { .lo = 1.0, .hi = 15.0, .glo = 1.0, .ghi = 15.0, .n = 141, .scale = LUT_LIN, .c = 0.0, },
+    { .lo = 1.2, .hi = 12.0, .glo = 0.2630344058337938, .ghi = 3.584962500721156, .n = 24, .scale = LUT_LOG, .c = 0.0, },
 } };
 static const f32 cea_n2o_paraffin_sup_Ivac_tbl[40608] = {
     +1.40907242e+02f,+1.44762039e+02f,+1.48313248e+02f,+1.51618088e+02f,

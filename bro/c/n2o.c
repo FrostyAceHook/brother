@@ -1,46 +1,19 @@
 #include "n2o.h"
 
 #include "assertion.h"
+#include "lut.h"
 #include "maths.h"
 
-// Generated tables. Each defines its grid macros and one named f32 array per
+// Generated tables. Each defines its axes (lutAxis) and one named f32 array per
 // field (N2O_<group>_<field>_tbl).
+//   N2O_sat.i    N2O_SAT_AXIS (T, cbrt about Tcrit)
+//   N2O_bound.i  N2O_BOUND_AXIS (T, linear)
+//   N2O_dense.i  N2O_DENSE_T_AXIS (T, sqrt about Tcrit), N2O_DENSE_PSI_AXIS
+//   N2O_light.i  N2O_LIGHT_T_AXIS (T, sqrt about Tcrit), N2O_LIGHT_PSI_AXIS
 #include "tbl/N2O_sat.i"
 #include "tbl/N2O_bound.i"
 #include "tbl/N2O_dense.i"
 #include "tbl/N2O_light.i"
-
-
-
-// =========================================================================== //
-// = INTERPOLATION =========================================================== //
-// =========================================================================== //
-
-// Linear interpolation of an evenly-spaced 1D table over [xlo, xhi]. Inputs
-// outside the range extrapolate from the end cells.
-static f64 N2O_lut1_(const f32* tbl, i32 len, f64 xlo, f64 xhi, f64 x) {
-    f64 t = (x - xlo) / (xhi - xlo) * (len - 1);
-    i32 i = min(max((i32)t, 0), len - 2);
-    t -= i;
-    return lerp((f64)tbl[i], (f64)tbl[i + 1], t);
-}
-
-// Bilinear interpolation of an evenly-spaced, C-ordered 2D table over
-// x in [xlo, xhi] (rows) and y in [0, 1] (columns).
-static f64 N2O_lut2_(const f32* tbl, i32 nx, i32 ny, f64 xlo, f64 xhi,
-        f64 x, f64 y) {
-    f64 t = (x - xlo) / (xhi - xlo) * (nx - 1);
-    f64 u = y * (ny - 1);
-    i32 i = min(max((i32)t, 0), nx - 2);
-    i32 j = min(max((i32)u, 0), ny - 2);
-    t -= i;
-    u -= j;
-    const f32* r0 = tbl + i*ny + j;
-    const f32* r1 = r0 + ny;
-    f64 X0 = lerp((f64)r0[0], (f64)r0[1], u);
-    f64 X1 = lerp((f64)r1[0], (f64)r1[1], u);
-    return lerp(X0, X1, t);
-}
 
 
 
@@ -53,9 +26,8 @@ static f64 N2O_lut2_(const f32* tbl, i32 nx, i32 ny, f64 xlo, f64 xhi,
         assert(N2O_Ttrip <= T && T < N2O_Tcrit,                             \
                 "saturated N2O input oob: T=%g", T);                        \
         /* Untabulated sliver [Tsat_hi, Tcrit) takes the last value. */     \
-        T = min(T, N2O_SAT_THI);                                            \
-        f64 X = N2O_lut1_(N2O_##side##_##name##_tbl, N2O_SAT_LEN,           \
-                N2O_SAT_TLO, N2O_SAT_THI, T);                               \
+        T = min(T, N2O_SAT_AXIS.hi);                                        \
+        f64 X = lut1(N2O_##side##_##name##_tbl, &N2O_SAT_AXIS, T);          \
         assert(notnan(X), "saturated N2O lookup nan: T=%g", T);             \
         return X;                                                           \
     }
@@ -78,14 +50,14 @@ f64 N2O_Tsat(f64 P) {
     // points (Clausius-Clapeyron shape), then Newton on the saturated table.
     f64 B = log2(N2O_Pcrit / N2O_Ptrip) / (1.0/N2O_Ttrip - 1.0/N2O_Tcrit);
     f64 T = 1.0 / (1.0/N2O_Ttrip - log2(P / N2O_Ptrip) / B);
-    for (i32 iter = 0; iter < 30; ++iter) {
-        T = min(max(T, N2O_Ttrip), N2O_SAT_THI);
+    for (i32 iter=0; iter<30; ++iter) {
+        T = min(max(T, N2O_Ttrip), N2O_SAT_AXIS.hi);
         f64 dT = (N2O_satliq_P(T) - P) / N2O_satliq_dPsat_dT(T);
         T -= dT;
         if (abs(dT) < 1e-9)
             break;
     }
-    return min(max(T, N2O_Ttrip), N2O_SAT_THI);
+    return min(max(T, N2O_Ttrip), N2O_SAT_AXIS.hi);
 }
 
 
@@ -98,10 +70,10 @@ f64 N2O_Tsat(f64 P) {
 static f64 N2O_rho_split_(const f32* tbl, f64 T) {
     if (T >= N2O_Tcrit)
         return N2O_rhocrit;
-    if (T <= N2O_SAT_THI)
-        return N2O_lut1_(tbl, N2O_SAT_LEN, N2O_SAT_TLO, N2O_SAT_THI, T);
-    f64 rho_hi = (f64)tbl[N2O_SAT_LEN - 1];
-    f64 x = (T - N2O_SAT_THI) / (N2O_Tcrit - N2O_SAT_THI);
+    if (T <= N2O_SAT_AXIS.hi)
+        return lut1(tbl, &N2O_SAT_AXIS, T);
+    f64 rho_hi = (f64)tbl[N2O_SAT_AXIS.n - 1];
+    f64 x = (T - N2O_SAT_AXIS.hi) / (N2O_Tcrit - N2O_SAT_AXIS.hi);
     return lerp(rho_hi, N2O_rhocrit, x);
 }
 static f64 N2O_rho_split_l_(f64 T) {
@@ -111,8 +83,7 @@ static f64 N2O_rho_split_v_(f64 T) {
     return N2O_rho_split_(N2O_satvap_rho_tbl, T);
 }
 static f64 N2O_rho_dense_max_(f64 T) {
-    return N2O_lut1_(N2O_bound_rho_dense_max_tbl, N2O_BOUND_LEN,
-            N2O_BOUND_TLO, N2O_BOUND_THI, T);
+    return lut1(N2O_bound_rho_dense_max_tbl, &N2O_BOUND_AXIS, T);
 }
 
 enum {
@@ -252,13 +223,11 @@ N2O_DOME_DRHO_(s)
         N2O_Loc_ l = N2O_locate_(T, rho);                                   \
         switch (l.region) {                                                 \
             case N2O_REGION_DENSE_:                                         \
-                return N2O_lut2_(N2O_dense_##name##_tbl,                    \
-                        N2O_DENSE_NT, N2O_DENSE_NPSI,                       \
-                        N2O_DENSE_TLO, N2O_DENSE_THI, T, l.psi);            \
+                return lut2(N2O_dense_##name##_tbl,                         \
+                        &N2O_DENSE_T_AXIS, &N2O_DENSE_PSI_AXIS, T, l.psi);  \
             case N2O_REGION_LIGHT_:                                         \
-                return N2O_lut2_(N2O_light_##name##_tbl,                    \
-                        N2O_LIGHT_NT, N2O_LIGHT_NPSI,                       \
-                        N2O_LIGHT_TLO, N2O_LIGHT_THI, T, l.psi);            \
+                return lut2(N2O_light_##name##_tbl,                         \
+                        &N2O_LIGHT_T_AXIS, &N2O_LIGHT_PSI_AXIS, T, l.psi);  \
             default:                                                        \
                 return N2O_dome_##name##_(T, rho, l);                       \
         }                                                                   \

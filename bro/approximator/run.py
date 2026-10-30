@@ -18,6 +18,108 @@ from . import cea
 __all__ = ["run", "main"]
 
 
+
+# ============================================================================
+# Shared LUT axis (mirrors lutAxis in lut.h).
+
+
+class LutAxis:
+    """Table axis evenly spaced in a transformed coordinate g(x):
+        "lin"   g(x) = x
+        "log"   g(x) = log2(x)
+        "sqrt"  g(x) = sign(x - c) * |x - c|^(1/2)  (nodes dense near c)
+        "cbrt"  g(x) = cbrt(x - c)                    (denser still near c)
+    Interpolation is linear in g, exactly as lut.c does it."""
+
+    _C_SCALE = {"lin": "LUT_LIN", "log": "LUT_LOG", "sqrt": "LUT_SQRT",
+                "cbrt": "LUT_CBRT"}
+
+    def __init__(self, lo, hi, n, scale="lin", c=0.0):
+        assert scale in self._C_SCALE, scale
+        self.lo = float(lo)
+        self.hi = float(hi)
+        self.n = int(n)
+        self.scale = scale
+        self.c = float(c)
+        self.glo = float(self.g(self.lo))
+        self.ghi = float(self.g(self.hi))
+
+    def g(self, x):
+        x = np.asarray(x, dtype=np.float64)
+        if self.scale == "log":
+            return np.log2(x)
+        if self.scale == "sqrt":
+            d = x - self.c
+            return np.sign(d) * np.sqrt(np.abs(d))
+        if self.scale == "cbrt":
+            return np.cbrt(x - self.c)
+        return x
+
+    def ginv(self, y):
+        y = np.asarray(y, dtype=np.float64)
+        if self.scale == "log":
+            return np.exp2(y)
+        if self.scale == "sqrt":
+            return self.c + np.sign(y) * y*y
+        if self.scale == "cbrt":
+            return self.c + y*y*y
+        return y
+
+    def nodes(self):
+        x = self.ginv(np.linspace(self.glo, self.ghi, self.n))
+        x[0] = self.lo # exact endpoints (no round-trip error).
+        x[-1] = self.hi
+        return x
+
+    def frac(self, x):
+        return (self.g(x) - self.glo) / (self.ghi - self.glo) * (self.n - 1)
+
+    def from_frac(self, f):
+        t = np.asarray(f, dtype=np.float64) / (self.n - 1)
+        return self.ginv(self.glo + t*(self.ghi - self.glo))
+
+    def mids(self):
+        """Cell centres in g (the worst case for linear interpolation)."""
+        return self.from_frac(np.arange(self.n - 1) + 0.5)
+
+    def c_init(self):
+        return (f"{{ "
+                f".lo = {self.lo!r}, "
+                f".hi = {self.hi!r}, "
+                f".glo = {self.glo!r}, "
+                f".ghi = {self.ghi!r}, "
+                f".n = {self.n}, "
+                f".scale = {self._C_SCALE[self.scale]}, "
+                f".c = {self.c!r}, "
+            f"}}")
+
+    def describe(self):
+        about = f" about {self.c:.6g}" if self.scale in ("sqrt", "cbrt") else ""
+        return (f"{self.n} nodes over [{self.lo:.6g}, {self.hi:.6g}], "
+                f"{self.scale}{about}")
+
+
+def _interp_axes(values, axes, coords):
+    """Multilinear interpolation matching lut.c. `values` has one axis per
+    entry of `axes`; `coords` is a list of physical-coordinate arrays."""
+    fr = [ax.frac(c) for ax, c in zip(axes, coords)]
+    idx = [np.clip(np.floor(f).astype(int), 0, ax.n - 2)
+           for f, ax in zip(fr, axes)]
+    t = [f - i for f, i in zip(fr, idx)]
+    v = np.asarray(values).astype(np.float32).astype(np.float64)
+    out = 0.0
+    dims = len(axes)
+    for corner in range(1 << dims):
+        w = 1.0
+        sel = []
+        for d in range(dims):
+            bit = (corner >> d) & 1
+            w = w * (t[d] if bit else (1.0 - t[d]))
+            sel.append(idx[d] + bit)
+        out = out + w * v[tuple(sel)]
+    return out
+
+
 # ============================================================================
 # N2O: saturation-aligned lookup tables.
 #
@@ -30,13 +132,15 @@ __all__ = ["run", "main"]
 # Inside the dome nothing is tabulated; the generated C builds those states
 # from the saturated tables with the lever rule.
 
-N2O_SIZE_SAT = 2000          # 1D saturated tables (cheap, and steep near Tcrit)
-N2O_SIZE_DENSE_MAX = 400     # 1D dense-table ceiling
-N2O_SIZE_DENSE = (150, 100)  # (T, psi)
-N2O_SIZE_LIGHT = (150, 100)  # (T, psi)
+N2O_AXES = dict(
+    sat=LutAxis(n2o.Ttrip, n2o.Tsat_hi, 2000, scale="cbrt", c=n2o.Tcrit),
+    bound=LutAxis(n2o.Ttrip, n2o.Tmax, 400),
+    T2d=LutAxis(n2o.Ttrip, n2o.Tmax, 220, scale="sqrt", c=n2o.Tcrit),
+    psi=LutAxis(0.0, 1.0, 100),
+)
 
 # Fields tabulated in the 2D single-phase tables. T and rho are inputs, X is
-# computed analytically in C, and the saturation slopes only exist on the
+# computed analytically, and the saturation slopes only exist on the
 # saturation line.
 N2O_FIELDS_2D = [f for f in n2o.FIELDS
                  if f not in ("T", "rho", "X", "Y", "IPLE")
@@ -89,53 +193,41 @@ def _err_summary(truth, approx, keep=None):
 
 
 class N2OTable1D:
-    """Several 1D LUTs (one per field) sharing a grid in T."""
+    """Several 1D LUTs (one per field) sharing one T axis."""
 
-    def __init__(self, prefix, func, fields, Tlo, Thi, size):
+    def __init__(self, prefix, func, fields, axis):
         self.prefix = prefix
         self.func = func          # T -> array ordered as `fields`
         self.fields = fields
-        self.Tlo = Tlo
-        self.Thi = Thi
-        self.size = size
-        self.T = np.linspace(Tlo, Thi, size)
-        self.values = np.array([func(T) for T in self.T]) # (size, nfields)
+        self.axis = axis
+        self.T = axis.nodes()
+        self.values = np.array([func(T) for T in self.T]) # (n, nfields)
 
     def __call__(self, k, T):
-        x = (np.asarray(T, dtype=np.float64) - self.Tlo) \
-          / (self.Thi - self.Tlo) * (self.size - 1)
-        i = np.clip(np.floor(x).astype(int), 0, self.size - 2)
-        t = x - i
-        v = self.values[:, k].astype(np.float32).astype(np.float64)
-        return v[i] + t*(v[i + 1] - v[i])
+        return _interp_axes(self.values[:, k], [self.axis], [T])
 
-    def c_source(self, group):
-        """C text: grid macros (prefixed by `group`) and one named f32 array
-        per field."""
+    def c_source(self, group, axis=True):
+        """C text: the axis (`<GROUP>_AXIS`) and one named f32 array per
+        field."""
         G = group.upper()
-        lines = [
-            f"/* {self.prefix}: {self.size}-point 1D LUTs in T. */",
-            f"#define {G}_TLO ({self.Tlo!r})",
-            f"#define {G}_THI ({self.Thi!r})",
-            f"#define {G}_LEN ({self.size})",
-            "",
-        ]
+        lines = [f"/* {self.prefix}: 1D LUTs in T, {self.axis.describe()}. */"]
+        if axis:
+            lines += [f"static const lutAxis {G}_AXIS = {self.axis.c_init()};",
+                      ""]
         for k, field in enumerate(self.fields):
             lines.append(f"static const f32 {self.prefix}_{field}_tbl"
-                         f"[{G}_LEN] = {{")
+                         f"[{self.axis.n}] = {{")
             lines.extend(_fmt_f32_table(self.values[:, k].astype(np.float32)))
             lines.append("};")
         lines.append("")
         return lines
 
     def run(self):
-        Tmid = 0.5*(self.T[:-1] + self.T[1:])
+        Tmid = self.axis.mids()
         truth = np.array([self.func(T) for T in Tmid])
         keep = np.abs(Tmid - n2o.Tcrit) > N2O_CRIT_BAND
-        print(f"    /* {self.prefix}: {self.size}-point 1D LUTs over "
-              f"T in [{self.Tlo:.6g}, {self.Thi:.6g}] K */")
+        print(f"    /* {self.prefix}: {self.axis.describe()} */")
         for k, field in enumerate(self.fields):
-            name = f"{self.prefix}_{field}"
             approx = self(k, Tmid)
             e_all = _err_summary(truth[:, k], approx)
             e_op = _err_summary(truth[:, k], approx, keep)
@@ -145,54 +237,42 @@ class N2OTable1D:
 
 
 class N2OTable2D:
-    """Several 2D LUTs (one per field) sharing a grid in (T, psi)."""
+    """Several 2D LUTs (one per field) sharing (T, psi) axes."""
 
-    def __init__(self, prefix, func, fields, field_idx, Tlo, Thi, size):
+    def __init__(self, prefix, func, fields, field_idx, T_axis, psi_axis):
         self.prefix = prefix
         self.func = func          # (T, psi) -> array ordered as n2o.FIELDS
         self.fields = fields
         self.field_idx = field_idx
-        self.Tlo = Tlo
-        self.Thi = Thi
-        self.shape = size
-        self.T = np.linspace(Tlo, Thi, size[0])
-        self.psi = np.linspace(0.0, 1.0, size[1])
-        vals = np.empty((size[0], size[1], len(fields)))
+        self.T_axis = T_axis
+        self.psi_axis = psi_axis
+        self.T = T_axis.nodes()
+        self.psi = psi_axis.nodes()
+        vals = np.empty((T_axis.n, psi_axis.n, len(fields)))
         for i, T in enumerate(self.T):
             for j, psi in enumerate(self.psi):
                 vals[i, j] = func(T, psi)[field_idx]
         self.values = vals
 
     def __call__(self, k, T, psi):
-        nx, ny = self.shape
-        x = (np.asarray(T, dtype=np.float64) - self.Tlo) \
-          / (self.Thi - self.Tlo) * (nx - 1)
-        y = np.asarray(psi, dtype=np.float64) * (ny - 1)
-        i = np.clip(np.floor(x).astype(int), 0, nx - 2)
-        j = np.clip(np.floor(y).astype(int), 0, ny - 2)
-        t = x - i
-        s = y - j
-        v = self.values[:, :, k].astype(np.float32).astype(np.float64)
-        c0 = v[i, j] + s*(v[i, j + 1] - v[i, j])
-        c1 = v[i + 1, j] + s*(v[i + 1, j + 1] - v[i + 1, j])
-        return c0 + t*(c1 - c0)
+        return _interp_axes(self.values[:, :, k], [self.T_axis, self.psi_axis],
+                [T, psi])
 
     def c_source(self, group):
-        """C text: grid macros (prefixed by `group`) and one named f32 array
-        per field, C-ordered (row = T index, col = psi index)."""
+        """C text: the axes (`<GROUP>_T_AXIS`, `<GROUP>_PSI_AXIS`) and one
+        named f32 array per field, C-ordered (row = T, col = psi)."""
         G = group.upper()
-        nx, ny = self.shape
         lines = [
-            f"/* {self.prefix}: {nx}x{ny} 2D LUTs in (T, psi), psi in [0, 1]. */",
-            f"#define {G}_TLO ({self.Tlo!r})",
-            f"#define {G}_THI ({self.Thi!r})",
-            f"#define {G}_NT ({nx})",
-            f"#define {G}_NPSI ({ny})",
+            f"/* {self.prefix}: 2D LUTs in (T, psi). */",
+            f"/*   T:   {self.T_axis.describe()} */",
+            f"/*   psi: {self.psi_axis.describe()} */",
+            f"static const lutAxis {G}_T_AXIS = {self.T_axis.c_init()};",
+            f"static const lutAxis {G}_PSI_AXIS = {self.psi_axis.c_init()};",
             "",
         ]
+        n = self.T_axis.n * self.psi_axis.n
         for k, field in enumerate(self.fields):
-            lines.append(f"static const f32 {self.prefix}_{field}_tbl"
-                         f"[{G}_NT*{G}_NPSI] = {{")
+            lines.append(f"static const f32 {self.prefix}_{field}_tbl[{n}] = {{")
             lines.extend(_fmt_f32_table(
                 self.values[:, :, k].astype(np.float32).flatten("C")))
             lines.append("};")
@@ -201,17 +281,15 @@ class N2OTable2D:
 
     def run(self):
         # Cell centres are the worst case for bilinear interpolation.
-        Tm = 0.5*(self.T[:-1] + self.T[1:])
-        Pm = 0.5*(self.psi[:-1] + self.psi[1:])
-        TT, PP = np.meshgrid(Tm, Pm, indexing="ij")
+        TT, PP = np.meshgrid(self.T_axis.mids(), self.psi_axis.mids(),
+                             indexing="ij")
         truth = np.empty(TT.shape + (len(self.fields),))
         for i in range(TT.shape[0]):
             for j in range(TT.shape[1]):
                 truth[i, j] = self.func(TT[i, j], PP[i, j])[self.field_idx]
         keep = np.abs(TT - n2o.Tcrit) > N2O_CRIT_BAND
-        nx, ny = self.shape
-        print(f"    /* {self.prefix}: {nx}x{ny} 2D LUTs over T in "
-              f"[{self.Tlo:.6g}, {self.Thi:.6g}] K, psi in [0, 1] */")
+        print(f"    /* {self.prefix}: T {self.T_axis.describe()}; "
+              f"psi {self.psi_axis.describe()} */")
         for k, field in enumerate(self.fields):
             name = f"{self.prefix}_{field}"
             approx = self(k, TT, PP)
@@ -244,8 +322,6 @@ def _write_tbl(name, lines):
                            f"edit. */"] + lines) + "\n")
 
 def _n2o_consts():
-    """Constants and field lists shared by n2o.h/n2o.c. Keeps the C side in
-    lock-step with the coordinate mapping used to build the tables."""
     def xmacro(name, fields):
         return [f"#define {name}(X) \\"] \
              + [f"    X({f}) \\" for f in fields] + [""]
@@ -270,44 +346,30 @@ def _n2o_consts():
     _write_tbl("N2O_consts", lines)
 
 
-def gen_n2o_tables(sizes=None):
-    """Builds all N2O tables, reports their accuracy and writes:
-        tbl/N2O_consts.i  constants + X-macro field lists (included by n2o.h)
-        tbl/N2O_sat.i     1D saturated liquid/vapour tables
-        tbl/N2O_bound.i   1D dense-table ceiling rho_dense_max(T)
-        tbl/N2O_dense.i   2D dense (liquid/supercritical) tables in (T, psi)
-        tbl/N2O_light.i   2D light (vapour/supercritical) tables in (T, psi)
-    """
-    sizes = sizes or {}
-    n_sat = sizes.get("sat", N2O_SIZE_SAT)
-    n_max = sizes.get("dense_max", N2O_SIZE_DENSE_MAX)
-    s_dense = sizes.get("dense", N2O_SIZE_DENSE)
-    s_light = sizes.get("light", N2O_SIZE_LIGHT)
+def gen_n2o_tables(axes=None):
+    axes = N2O_AXES | (axes or {})
 
     idx_sat = [n2o.FIELDS.index(f) for f in N2O_FIELDS_SAT]
     idx_2d = [n2o.FIELDS.index(f) for f in N2O_FIELDS_2D]
 
     satliq = N2OTable1D("N2O_satliq",
-            lambda T: n2o.query_sat(T, 0)[idx_sat],
-            N2O_FIELDS_SAT, n2o.Ttrip, n2o.Tsat_hi, n_sat)
+            lambda T: n2o.query_sat(T, 0)[idx_sat], N2O_FIELDS_SAT, axes["sat"])
     satvap = N2OTable1D("N2O_satvap",
-            lambda T: n2o.query_sat(T, 1)[idx_sat],
-            N2O_FIELDS_SAT, n2o.Ttrip, n2o.Tsat_hi, n_sat)
+            lambda T: n2o.query_sat(T, 1)[idx_sat], N2O_FIELDS_SAT, axes["sat"])
     bound = N2OTable1D("N2O_bound", lambda T: np.array([n2o.rho_dense_max(T)]),
-            ["rho_dense_max"], n2o.Ttrip, n2o.Tmax, n_max)
+            ["rho_dense_max"], axes["bound"])
     dense = N2OTable2D("N2O_dense", n2o.query_dense, N2O_FIELDS_2D, idx_2d,
-            n2o.Ttrip, n2o.Tmax, s_dense)
+            axes["T2d"], axes["psi"])
     light = N2OTable2D("N2O_light", n2o.query_light, N2O_FIELDS_2D, idx_2d,
-            n2o.Ttrip, n2o.Tmax, s_light)
+            axes["T2d"], axes["psi"])
 
     for tbl in (satliq, satvap, bound, dense, light):
         tbl.run()
 
     _n2o_consts()
     # Both saturated sides share one grid, so they share one file/macro set.
-    sat_lines = satliq.c_source("N2O_SAT")
-    sat_lines += satvap.c_source("N2O_SAT")[5:] # skip duplicate grid macros
-    _write_tbl("N2O_sat", sat_lines)
+    _write_tbl("N2O_sat", satliq.c_source("N2O_SAT")
+                        + satvap.c_source("N2O_SAT", axis=False))
     _write_tbl("N2O_bound", bound.c_source("N2O_BOUND"))
     _write_tbl("N2O_dense", dense.c_source("N2O_DENSE"))
     _write_tbl("N2O_light", light.c_source("N2O_LIGHT"))
@@ -340,37 +402,6 @@ def gen_n2o_tables(sizes=None):
 #
 # Values come from cea.CEA (configured per propellant), whose cacher grid is far
 # finer than these tables, so its interpolation is negligible here.
-
-
-class CeaAxis:
-    def __init__(self, lo, hi, n, log=False):
-        self.lo = float(lo)
-        self.hi = float(hi)
-        self.n = int(n)
-        self.log = bool(log)
-
-    def nodes(self):
-        if self.log:
-            return np.geomspace(self.lo, self.hi, self.n)
-        return np.linspace(self.lo, self.hi, self.n)
-
-    def frac(self, x):
-        """Fractional table index of `x` (matches cea.c)."""
-        x = np.asarray(x, dtype=np.float64)
-        if self.log:
-            t = (np.log(x) - np.log(self.lo)) / (np.log(self.hi) - np.log(self.lo))
-        else:
-            t = (x - self.lo) / (self.hi - self.lo)
-        return t * (self.n - 1)
-
-    def from_frac(self, f):
-        t = np.asarray(f, dtype=np.float64) / (self.n - 1)
-        if self.log:
-            return np.exp(np.log(self.lo) + t*(np.log(self.hi) - np.log(self.lo)))
-        return self.lo + t*(self.hi - self.lo)
-
-    def c_init(self):
-        return f"{{ {self.lo!r}, {self.hi!r}, {self.n}, {int(self.log)} }}"
 
 
 # All (station, field) pairs the C API can ask for. Pairs a propellant doesn't
@@ -412,9 +443,9 @@ _THT = [f for f in CEA_FIELD_NAMES if f != "M"]
 CEA_PROPELLANTS = [
     dict(
         enum="CEA_N2O_PARAFFIN", key="n2o_paraffin", ox="n2o", fuel="paraffin",
-        P=CeaAxis(0.5e5, 90e5, 30, log=True), ofr=CeaAxis(1.0, 15.0, 351),
-        P3=CeaAxis(0.5e5, 90e5, 12, log=True), ofr3=CeaAxis(1.0, 15.0, 141),
-        sup=CeaAxis(1.2, 12.0, 24, log=True), sub=None,
+        P=LutAxis(0.5e5, 90e5, 30, scale="log"), ofr=LutAxis(1.0, 15.0, 351),
+        P3=LutAxis(0.5e5, 90e5, 12, scale="log"), ofr3=LutAxis(1.0, 15.0, 141),
+        sup=LutAxis(1.2, 12.0, 24, scale="log"), sub=None,
         fields=dict(cc=_CC, tht=_THT, sup=["Ivac"], sub=[]),
     ),
 ]
@@ -423,24 +454,7 @@ CEA_N_CHECK = 400 # random points per table group for the error check.
 
 
 def _interp_nd(values, axes, coords):
-    """Multilinear interpolation matching cea.c. `values` has shape
-    (n0, n1[, n2]); `coords` is a list of arrays of physical coordinates."""
-    fr = [ax.frac(c) for ax, c in zip(axes, coords)]
-    idx = [np.clip(np.floor(f).astype(int), 0, ax.n - 2)
-           for f, ax in zip(fr, axes)]
-    t = [f - i for f, i in zip(fr, idx)]
-    v = values.astype(np.float32).astype(np.float64)
-    out = 0.0
-    dims = len(axes)
-    for corner in range(1 << dims):
-        w = 1.0
-        sel = []
-        for d in range(dims):
-            bit = (corner >> d) & 1
-            w = w * (t[d] if bit else (1.0 - t[d]))
-            sel.append(idx[d] + bit)
-        out = out + w * v[tuple(sel)]
-    return out
+    return _interp_axes(values, axes, coords)
 
 
 class CeaTableGroup:
@@ -449,7 +463,7 @@ class CeaTableGroup:
     def __init__(self, prop, station, axes, fields, evaluate):
         self.prop = prop
         self.station = station
-        self.axes = axes          # list of CeaAxis (2 or 3)
+        self.axes = axes          # list of LutAxis (2 or 3)
         self.fields = fields      # list of field names
         self.evaluate = evaluate  # (field, *coords) -> array
         self.name = f"cea_{prop['key']}_{station}"
@@ -463,7 +477,7 @@ class CeaTableGroup:
         coords = [ax.from_frac(rng.uniform(0, ax.n - 1, CEA_N_CHECK))
                   for ax in self.axes]
         print(f"    /* {self.name}: "
-              + " x ".join(f"{ax.n}{'(log)' if ax.log else ''}"
+              + " x ".join(f"{ax.n}({ax.scale})"
                            for ax in self.axes) + " */")
         for f in self.fields:
             truth = np.asarray(self.evaluate(f, *coords), dtype=np.float64)
