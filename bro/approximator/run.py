@@ -13,6 +13,7 @@ from .. import geez
 from ..geez import new_figure, new_plots, new_window, no_window
 
 from . import n2o
+from . import cea
 
 __all__ = ["run", "main"]
 
@@ -269,7 +270,7 @@ def _n2o_consts():
     _write_tbl("N2O_consts", lines)
 
 
-def find_n2o_tables(sizes=None):
+def gen_n2o_tables(sizes=None):
     """Builds all N2O tables, reports their accuracy and writes:
         tbl/N2O_consts.i  constants + X-macro field lists (included by n2o.h)
         tbl/N2O_sat.i     1D saturated liquid/vapour tables
@@ -315,6 +316,265 @@ def find_n2o_tables(sizes=None):
     print("")
 
 
+
+
+
+
+# ============================================================================
+# CEA: per-propellant combustion lookup tables.
+#
+# Every propellant combination gets its own tables over its own domain, written
+# to tbl/cea_<key>.i, plus one generated index (tbl/cea_index.i) that maps
+# (propellant, station, field) to a table so cea.c can dispatch on a
+# `ceaProp` argument.
+#
+# Axes are evenly spaced in either x or log(x). Chamber pressure is log-spaced
+# for the hybrids (it spans ~2 decades there, and equilibrium properties vary
+# roughly with log P), as is the supersonic area ratio (Ivac ~ log AR).
+#
+# Stations, as selected by the C-side `AR` argument:
+#   AR == 0      chamber (stagnation)       2D in (P, ofr)
+#   AR == 1      throat                     2D in (P, ofr)
+#   AR >  1      supersonic, A/At = AR      3D in (P, ofr, AR)
+#   0 < AR < 1   subsonic,   A/At = 1/AR    3D in (P, ofr, AR)
+#
+# Values come from cea.CEA (configured per propellant), whose cacher grid is far
+# finer than these tables, so its interpolation is negligible here.
+
+
+class CeaAxis:
+    def __init__(self, lo, hi, n, log=False):
+        self.lo = float(lo)
+        self.hi = float(hi)
+        self.n = int(n)
+        self.log = bool(log)
+
+    def nodes(self):
+        if self.log:
+            return np.geomspace(self.lo, self.hi, self.n)
+        return np.linspace(self.lo, self.hi, self.n)
+
+    def frac(self, x):
+        """Fractional table index of `x` (matches cea.c)."""
+        x = np.asarray(x, dtype=np.float64)
+        if self.log:
+            t = (np.log(x) - np.log(self.lo)) / (np.log(self.hi) - np.log(self.lo))
+        else:
+            t = (x - self.lo) / (self.hi - self.lo)
+        return t * (self.n - 1)
+
+    def from_frac(self, f):
+        t = np.asarray(f, dtype=np.float64) / (self.n - 1)
+        if self.log:
+            return np.exp(np.log(self.lo) + t*(np.log(self.hi) - np.log(self.lo)))
+        return self.lo + t*(self.hi - self.lo)
+
+    def c_init(self):
+        return f"{{ {self.lo!r}, {self.hi!r}, {self.n}, {int(self.log)} }}"
+
+
+# All (station, field) pairs the C API can ask for. Pairs a propellant doesn't
+# tabulate get NULL entries in the index (and assert if requested).
+CEA_STATIONS = ["cc", "tht", "sup", "sub"]
+CEA_FIELDS = [
+    # name,   CEA station name, units (as returned by cea.CEA)
+    ("T",     "t",     "temperature [K]"),
+    ("P",     "p",     "pressure"),
+    ("rho",   "rho",   "density [kg/m^3]"),
+    ("M",     "mach",  "Mach number [-]"),
+    ("a",     "son",   "speed of sound [m/s]"),
+    ("gamma", "gamma", "ratio of specific heats [-]"),
+    ("cp",    "cp",    "isobaric heat capacity"),
+    ("mu",    "visc",  "dynamic viscosity"),
+    ("Pr",    "pran",  "Prandtl number [-]"),
+    ("Mw",    "mw",    "molar mass"),
+    ("Ivac",  "ivac",  "vacuum specific impulse [s]"),
+]
+CEA_FIELD_NAMES = [f[0] for f in CEA_FIELDS]
+_CEA_NAME = {f[0]: f[1] for f in CEA_FIELDS}
+
+def _cea_source_name(station, field):
+    # Chamber values come from the "c_*" outputs; every other station is the
+    # exit-plane output of a problem with the matching area ratio.
+    return ("c_" if station == "cc" else "") + _CEA_NAME[field]
+
+# Fields per station. Mach is exact at the chamber (0) and throat (1), and Ivac
+# has no meaning at the chamber.
+_ALL_STN = [f for f in CEA_FIELD_NAMES]
+_CC = [f for f in CEA_FIELD_NAMES if f not in ("M", "Ivac")]
+_THT = [f for f in CEA_FIELD_NAMES if f != "M"]
+
+# Propellants. `enum` must match `ceaProp` in cea.h.
+#   P    : chamber pressure axis [Pa]
+#   ofr  : oxidiser/fuel ratio axis
+#   sup/sub : area-ratio axes (None to skip that station)
+#   fields  : which fields to tabulate at each station
+CEA_PROPELLANTS = [
+    dict(
+        enum="CEA_N2O_PARAFFIN", key="n2o_paraffin", ox="n2o", fuel="paraffin",
+        P=CeaAxis(0.5e5, 90e5, 30, log=True), ofr=CeaAxis(1.0, 15.0, 351),
+        P3=CeaAxis(0.5e5, 90e5, 12, log=True), ofr3=CeaAxis(1.0, 15.0, 141),
+        sup=CeaAxis(1.2, 12.0, 24, log=True), sub=None,
+        fields=dict(cc=_CC, tht=_THT, sup=["Ivac"], sub=[]),
+    ),
+]
+
+CEA_N_CHECK = 400 # random points per table group for the error check.
+
+
+def _interp_nd(values, axes, coords):
+    """Multilinear interpolation matching cea.c. `values` has shape
+    (n0, n1[, n2]); `coords` is a list of arrays of physical coordinates."""
+    fr = [ax.frac(c) for ax, c in zip(axes, coords)]
+    idx = [np.clip(np.floor(f).astype(int), 0, ax.n - 2)
+           for f, ax in zip(fr, axes)]
+    t = [f - i for f, i in zip(fr, idx)]
+    v = values.astype(np.float32).astype(np.float64)
+    out = 0.0
+    dims = len(axes)
+    for corner in range(1 << dims):
+        w = 1.0
+        sel = []
+        for d in range(dims):
+            bit = (corner >> d) & 1
+            w = w * (t[d] if bit else (1.0 - t[d]))
+            sel.append(idx[d] + bit)
+        out = out + w * v[tuple(sel)]
+    return out
+
+
+class CeaTableGroup:
+    """All fields of one (propellant, station), sharing one grid."""
+
+    def __init__(self, prop, station, axes, fields, evaluate):
+        self.prop = prop
+        self.station = station
+        self.axes = axes          # list of CeaAxis (2 or 3)
+        self.fields = fields      # list of field names
+        self.evaluate = evaluate  # (field, *coords) -> array
+        self.name = f"cea_{prop['key']}_{station}"
+        grids = np.meshgrid(*[ax.nodes() for ax in axes], indexing="ij")
+        self.values = {f: np.asarray(evaluate(f, *grids), dtype=np.float64)
+                       for f in fields}
+
+    def check(self, rng):
+        # Random points, uniform in table-index space (so log axes are sampled
+        # evenly in log).
+        coords = [ax.from_frac(rng.uniform(0, ax.n - 1, CEA_N_CHECK))
+                  for ax in self.axes]
+        print(f"    /* {self.name}: "
+              + " x ".join(f"{ax.n}{'(log)' if ax.log else ''}"
+                           for ax in self.axes) + " */")
+        for f in self.fields:
+            truth = np.asarray(self.evaluate(f, *coords), dtype=np.float64)
+            approx = _interp_nd(self.values[f], self.axes, coords)
+            e = _err_summary(truth, approx)
+            print(f"    /*   {f:>6}: max err {e[0]*100:.3g}% "
+                  f"(of range {e[1]*100:.3g}%) */")
+            if summary_window is not None and len(self.axes) == 2:
+                X, Y = np.meshgrid(*[ax.nodes() for ax in self.axes],
+                                   indexing="ij")
+                fig, axs = summary_window.new_plots(rows=1, cols=1,
+                        title=f"LUT {self.name}_{f}")
+                axs = np.asarray(axs).ravel()
+                cont = axs[0].contourf(X, Y, self.values[f], levels=300,
+                        cmap="viridis")
+                fig.colorbar(cont, ax=axs[0])
+                axs[0].set_title(f"{self.name}_{f} (table nodes)")
+
+    def c_source(self):
+        lines = [
+            f"static const ceaGrid_ {self.name}_grid_ = {{ {len(self.axes)}, {{",
+        ] + [f"    {ax.c_init()}," for ax in self.axes] + ["} };"]
+        for f in self.fields:
+            tbl = self.values[f].astype(np.float32).flatten("C")
+            lines.append(f"static const f32 {self.name}_{f}_tbl[{len(tbl)}] = {{")
+            lines.extend(_fmt_f32_table(tbl))
+            lines.append("};")
+        lines.append("")
+        return lines
+
+
+def gen_cea_tables(propellants=None, seed=0):
+    """Builds, checks and writes the CEA tables for each propellant, then the
+    dispatch index. Writes tbl/cea_<key>.i and tbl/cea_index.i."""
+    propellants = propellants or CEA_PROPELLANTS
+    rng = np.random.default_rng(seed)
+    present = {} # (station, field) -> {enum: group name}
+
+    for prop in propellants:
+        print(f"    /* CEA {prop['ox']}/{prop['fuel']} ({prop['enum']}) */")
+        with cea.CEA.configure(prop["ox"], prop["fuel"]):
+
+            def station_eval(station):
+                def ev(field, P, ofr, AR=None):
+                    if station == "cc":
+                        AR = 1.0 # chamber outputs don't depend on AR.
+                    elif station == "tht":
+                        AR = 1.0
+                    getter = cea.CEA[_cea_source_name(station, field)]
+                    return getter(P, ofr, AR)
+                return ev
+
+            groups = []
+            for station in ("cc", "tht"):
+                fields = prop["fields"][station]
+                if fields:
+                    groups.append(CeaTableGroup(prop, station,
+                            [prop["P"], prop["ofr"]], fields,
+                            station_eval(station)))
+            for station in ("sup", "sub"):
+                fields = prop["fields"][station]
+                if prop[station] is not None and fields:
+                    groups.append(CeaTableGroup(prop, station,
+                            [prop["P3"], prop["ofr3"], prop[station]], fields,
+                            station_eval(station)))
+
+            for g in groups:
+                g.check(rng)
+
+        lines = [f"/* CEA {prop['ox']}/{prop['fuel']} ({prop['enum']}). */", ""]
+        for g in groups:
+            lines += g.c_source()
+            for f in g.fields:
+                present.setdefault((g.station, f), {})[prop["enum"]] = g.name
+        _write_tbl(f"cea_{prop['key']}", lines)
+
+    # Index: one array per (station, field) the C API knows about, indexed by
+    # ceaProp. Missing entries are zero (NULL), which cea.c asserts on.
+    lines = ["/* (station, field) -> per-propellant table. */"]
+    lines += [f'#include "cea_{p["key"]}.i"' for p in propellants]
+    lines.append("")
+    keys = [(s, f) for s in CEA_STATIONS for f in CEA_FIELD_NAMES] \
+         + [("perfexp", "AEAT")]
+    for station, f in keys:
+        lines.append(f"static const ceaTable_ cea_{station}_{f}_tbls_"
+                     f"[CEA_PROP_COUNT] = {{")
+        # Every propellant gets an explicit entry (NULL if not tabulated), so
+        # no array is ever empty-initialised (ISO C forbids `= {}` pre-C23).
+        have = present.get((station, f), {})
+        for p in propellants:
+            gname = have.get(p["enum"])
+            if gname is None:
+                lines.append(f"    [{p['enum']}] = {{ NULL, NULL }},")
+            else:
+                lines.extend([f"    [{p['enum']}] = {{",
+                              f"        {gname}_{f}_tbl,",
+                              f"        &{gname}_grid_",
+                              f"    }},"])
+        lines.append("};")
+    lines.append("")
+    _write_tbl("cea_index", lines)
+    print("    /* CEA tables written: tbl/cea_index.i, "
+          + ", ".join(f"tbl/cea_{p['key']}.i" for p in propellants) + " */")
+    print("")
+
+
+
+
+
+
+
 def _run():
 
     from contextlib import contextmanager
@@ -338,17 +598,11 @@ def _run():
                 print(f"{title}: {dt:.6f} s "
                       f"({count} iters; too fast to extrapolate)")
 
-    with timer("N2O"):
-        print("N2O_Ttrip:   ", n2o.Ttrip)
-        print("N2O_Ptrip:   ", n2o.Ptrip)
-        print("N2O_Tcrit:   ", n2o.Tcrit)
-        print("N2O_Pcrit:   ", n2o.Pcrit)
-        print("N2O_rhocrit: ", n2o.rhocrit)
-        print("N2O_Tmax:    ", n2o.Tmax)
-        print("N2O_Pmax:    ", n2o.Pmax)
-        print("N2O_rhomin:  ", n2o.rhomin)
-        print()
-        find_n2o_tables()
+    # with timer("N2O"):
+    #     gen_n2o_tables()
+
+    with timer("CEA"):
+        gen_cea_tables()
 
 
 

@@ -5,6 +5,7 @@
 #include "optim.h"
 
 #include "n2o.h"
+#include "cea.h"
 
 
 
@@ -36,4 +37,5 @@ c_IH sim_interpretation_hash(void) {
 void sim_execute(simState* rstr s) {
     printf("hi c %f\n", s->x);
     printf("%f\n", N2O_Psat(298.15));
+    printf("%f\n", cea_T(CEA_N2O_PARAFFIN, 32.0e5, 8.0, CEA_AR_stag));
 }

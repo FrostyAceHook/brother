@@ -5,10 +5,10 @@
 
 // Generated tables. Each defines its grid macros and one named f32 array per
 // field (N2O_<group>_<field>_tbl).
-#include "tbl/N2O_sat.i"   // N2O_SAT_{TLO,THI,LEN},   N2O_sat{liq,vap}_<f>_tbl
-#include "tbl/N2O_bound.i" // N2O_BOUND_{TLO,THI,LEN}, N2O_bound_rho_dense_max_tbl
-#include "tbl/N2O_dense.i" // N2O_DENSE_{TLO,THI,NT,NPSI}, N2O_dense_<f>_tbl
-#include "tbl/N2O_light.i" // N2O_LIGHT_{TLO,THI,NT,NPSI}, N2O_light_<f>_tbl
+#include "tbl/N2O_sat.i"
+#include "tbl/N2O_bound.i"
+#include "tbl/N2O_dense.i"
+#include "tbl/N2O_light.i"
 
 
 

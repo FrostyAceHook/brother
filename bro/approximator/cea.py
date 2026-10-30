@@ -13,6 +13,10 @@ from .. import paths
 __all__ = ["CEA_Result", "CEA"]
 
 
+# Tags cache files so stale fields aren't used. Bump on any field change.
+_VERSION = "v1"
+
+
 def cea_result_correction(name, x):
     factor = 1.0
     if name in {"p", "t_p", "c_p"}:
@@ -153,7 +157,7 @@ def CEA(oxid, fuel):
             pressure=30, pressure_units="bar", o_f=5, ae_at=5,
         )
     def f(P, ofr, AEAT):
-        problem.set_pressure(P * 10) # mpa -> bar
+        problem.set_pressure(P * 1e-5) # Pa -> bar
         problem.set_o_f(ofr)
         if AEAT >= 1:
             problem.set_sup(AEAT)
@@ -163,13 +167,11 @@ def CEA(oxid, fuel):
         cea = problem.run()
         return CEA_Result.from_obj(cea)
 
-    spacing_P = 0.005
-    spacing_ofr = 0.02
-    spacing_AEAT = 0.02
-    spacing = np.array([spacing_P, spacing_ofr, spacing_AEAT])
+    spacing = np.array([5000.0, 0.02, 0.02]) # P [Pa], ofr [-], AR [-]
+
 
     return cacher.Cacher(
-        f"CEA-{oxid}-{fuel}",
+        f"CEA-{oxid}-{fuel}-{_VERSION}",
         spacing,
         f,
         CEA_Result.from_arr,

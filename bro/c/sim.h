@@ -9,7 +9,7 @@
     X(x, f64, C_INPUT)
 
 
-// Da state array.
+// Da state array (RIP bro sis).
 typedef struct simState {
     #define X(name, type, flags) type name;
     SIM_INTERPRETATION
