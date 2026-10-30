@@ -24,7 +24,9 @@
 //          GENERAL          //
 // ========================= //
 
-// Always defined:
+// Always defined. Inside the dome, P is the saturation pressure, s/h/u/Z are
+// lever-rule mixture values, and cv and the partial derivatives are the
+// equilibrium-mixture values ((dP/drho)_T = 0, (dP/dT)_rho = dPsat/dT).
 f64 N2O_P(f64 T, f64 rho);
 f64 N2O_s(f64 T, f64 rho);
 f64 N2O_h(f64 T, f64 rho);
@@ -32,19 +34,21 @@ f64 N2O_u(f64 T, f64 rho);
 f64 N2O_Z(f64 T, f64 rho);
 f64 N2O_X(f64 T, f64 rho); // Vapour quality [-] (<0 compressed liquid,
                            //   >1 superheated vapour, NaN supercritical)
-
-// Single-phase only (NaN inside the dome):
-f64 N2O_cp(f64 T, f64 rho);
 f64 N2O_cv(f64 T, f64 rho);
-f64 N2O_Y(f64 T, f64 rho);
-f64 N2O_a(f64 T, f64 rho);
-f64 N2O_IPLE(f64 T, f64 rho);
 f64 N2O_dP_dT_rho(f64 T, f64 rho);
 f64 N2O_dP_drho_T(f64 T, f64 rho);
 f64 N2O_du_drho_T(f64 T, f64 rho);
 f64 N2O_dh_dT_rho(f64 T, f64 rho);
 f64 N2O_dh_drho_T(f64 T, f64 rho);
 f64 N2O_ds_drho_T(f64 T, f64 rho);
+
+// Single-phase only (NaN inside the dome, where they're undefined for an
+// equilibrium mixture: cp is infinite, and the mixture sound speed is a
+// different quantity):
+f64 N2O_cp(f64 T, f64 rho);
+f64 N2O_Y(f64 T, f64 rho);
+f64 N2O_a(f64 T, f64 rho);
+f64 N2O_IPLE(f64 T, f64 rho);
 
 
 // ========================= //

@@ -598,8 +598,8 @@ def _run():
                 print(f"{title}: {dt:.6f} s "
                       f"({count} iters; too fast to extrapolate)")
 
-    # with timer("N2O"):
-    #     gen_n2o_tables()
+    with timer("N2O"):
+        gen_n2o_tables()
 
     with timer("CEA"):
         gen_cea_tables()

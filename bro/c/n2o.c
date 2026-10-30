@@ -180,21 +180,72 @@ static f64 N2O_dome_Z_(f64 T, f64 rho, N2O_Loc_ l) {
     (void)l;
     return N2O_satliq_P(T) / (rho * N2O_R * T);
 }
+// Undefined for an equilibrium mixture (cp is infinite; the mixture sound speed
+// is a different quantity).
 #define N2O_DOME_NAN_(name)                                                 \
     static f64 N2O_dome_##name##_(f64 T, f64 rho, N2O_Loc_ l) {             \
         (void)T; (void)rho; (void)l;                                        \
-        return NAN; /* single-phase only */                            \
+        return NAN;                                                         \
     }
 N2O_DOME_NAN_(cp)
-N2O_DOME_NAN_(cv)
 N2O_DOME_NAN_(a)
-N2O_DOME_NAN_(dP_dT_rho)
-N2O_DOME_NAN_(dP_drho_T)
-N2O_DOME_NAN_(du_drho_T)
-N2O_DOME_NAN_(dh_dT_rho)
-N2O_DOME_NAN_(dh_drho_T)
-N2O_DOME_NAN_(ds_drho_T)
 #undef N2O_DOME_NAN_
+
+// Equilibrium-mixture partials, from the saturated tables and their slopes
+// along the saturation curve ('). With v = 1/rho, X = (v - v_l)/v_fg and
+// phi = phi_l + X*phi_fg for phi in {u, h, s}:
+//   (dphi/drho)_T = -phi_fg / (rho^2 * v_fg)
+//   (dphi/dT)_rho = phi_l' + X*phi_fg' + phi_fg * dX/dT,
+//       dX/dT = -(v_l' + X*v_fg') / v_fg
+//   (dP/dT)_rho = dPsat/dT,  (dP/drho)_T = 0,  cv = (du/dT)_rho
+typedef struct N2O_Mix_ {
+    f64 X;    // quality
+    f64 vfg;  // v_v - v_l
+    f64 dXdT; // (dX/dT)_rho
+} N2O_Mix_;
+static N2O_Mix_ N2O_mix_(f64 T, f64 rho, N2O_Loc_ l) {
+    f64 vl = 1.0/l.rl;
+    f64 vv = 1.0/l.rv;
+    f64 vfg = vv - vl;
+    f64 X = (1.0/rho - vl) / vfg;
+    f64 dvl = -N2O_satliq_drhosat_dT(T) * vl*vl;
+    f64 dvv = -N2O_satvap_drhosat_dT(T) * vv*vv;
+    return (N2O_Mix_){ X, vfg, -(dvl + X*(dvv - dvl)) / vfg };
+}
+static f64 N2O_mix_dT_rho_(N2O_Mix_ m, f64 fl, f64 fv, f64 dfl, f64 dfv) {
+    return dfl + m.X*(dfv - dfl) + (fv - fl)*m.dXdT;
+}
+static f64 N2O_mix_drho_T_(N2O_Mix_ m, f64 rho, f64 fl, f64 fv) {
+    return -(fv - fl) / (rho*rho*m.vfg);
+}
+
+static f64 N2O_dome_cv_(f64 T, f64 rho, N2O_Loc_ l) {
+    return N2O_mix_dT_rho_(N2O_mix_(T, rho, l),
+            N2O_satliq_u(T), N2O_satvap_u(T),
+            N2O_satliq_dusat_dT(T), N2O_satvap_dusat_dT(T));
+}
+static f64 N2O_dome_dh_dT_rho_(f64 T, f64 rho, N2O_Loc_ l) {
+    return N2O_mix_dT_rho_(N2O_mix_(T, rho, l),
+            N2O_satliq_h(T), N2O_satvap_h(T),
+            N2O_satliq_dhsat_dT(T), N2O_satvap_dhsat_dT(T));
+}
+static f64 N2O_dome_dP_dT_rho_(f64 T, f64 rho, N2O_Loc_ l) {
+    (void)rho; (void)l;
+    return N2O_satliq_dPsat_dT(T);
+}
+static f64 N2O_dome_dP_drho_T_(f64 T, f64 rho, N2O_Loc_ l) {
+    (void)T; (void)rho; (void)l;
+    return 0.0;
+}
+#define N2O_DOME_DRHO_(fld)                                                 \
+    static f64 N2O_dome_d##fld##_drho_T_(f64 T, f64 rho, N2O_Loc_ l) {      \
+        return N2O_mix_drho_T_(N2O_mix_(T, rho, l), rho,                    \
+                N2O_satliq_##fld(T), N2O_satvap_##fld(T));                  \
+    }
+N2O_DOME_DRHO_(u)
+N2O_DOME_DRHO_(h)
+N2O_DOME_DRHO_(s)
+#undef N2O_DOME_DRHO_
 
 #define N2O_DEFINE_GENERAL_(name)                                           \
     f64 N2O_##name(f64 T, f64 rho) {                                        \
@@ -219,7 +270,7 @@ N2O_TBL_2D_FIELDS(N2O_DEFINE_GENERAL_)
 // Derived rather than tabulated: Y stays exactly consistent with cp and cv, and
 // IPLE (~1/P along psi at low T) interpolates badly while a and P don't.
 f64 N2O_Y(f64 T, f64 rho) {
-    return N2O_cp(T, rho) / N2O_cv(T, rho); // NaN inside the dome.
+    return N2O_cp(T, rho) / N2O_cv(T, rho); // NaN inside the dome (cp is).
 }
 f64 N2O_IPLE(f64 T, f64 rho) {
     f64 a = N2O_a(T, rho); // NaN inside the dome.

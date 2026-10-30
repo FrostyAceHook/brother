@@ -5,9 +5,10 @@ All properties are mass-specific SI. Every query returns the same `FIELDS`
 struct (unused fields are NaN).
 
 Query kinds:
-  - N2O()       : cached general state at (T, rho). Single-phase-only
-                  properties are NaN inside the dome. Saturation-line slopes
-                  are always NaN.
+  - N2O()       : cached general state at (T, rho). Inside the dome, cv and
+                  the partial derivatives are the equilibrium-mixture values,
+                  while cp, Y, a and IPLE (undefined for a mixture) are NaN.
+                  Saturation-line slopes are always NaN.
   - N2Osatliq() : cached saturated liquid at T, evaluated as the single-phase
   - N2Osatvap() : cached saturated vapour at T, (one-sided limit), so every
                   property is defined.
@@ -41,7 +42,7 @@ import numpy as np
 from . import cacher
 
 __all__ = [
-    "FIELDS", "FIELDS_SAT_ONLY", "FIELDS_SINGLE_PHASE_ONLY", "N2O_Properties",
+    "FIELDS", "FIELDS_THERMO", "FIELDS_SAT_ONLY", "FIELDS_SINGLE_PHASE_ONLY", "N2O_Properties",
     "N2O", "N2Osatliq", "N2Osatvap",
     "Ttrip", "Ptrip", "Tcrit", "Pcrit", "rhocrit", "Mw", "R",
     "Tmin", "Tmax", "Pmax", "rhomin", "Tsat_hi",
@@ -53,7 +54,7 @@ __all__ = [
 
 
 # Tags cache files so stale fields aren't used. Bump on any field change.
-_VERSION = "v2"
+_VERSION = "v3"
 
 
 FIELDS = [
@@ -67,8 +68,11 @@ FIELDS = [
             #   NaN supercritical; exactly 0/1 for saturated queries)
     "Z",    # Compressibility factor [-]
 ]
-FIELDS_SINGLE_PHASE_ONLY = [
-    # Single-phase only (NaN inside the dome):
+FIELDS_THERMO = [
+    # Single-phase values outside the dome. Inside it, cp, Y, a and IPLE are
+    # NaN (undefined for an equilibrium mixture: cp is infinite, and the
+    # mixture sound speed is a different quantity), while cv and the partials
+    # are the equilibrium-mixture values (see `_mixture_partials`).
     "cp",   # Isobaric heat capacity [J/kg/K]
     "cv",   # Isochoric heat capacity [J/kg/K]
     "Y",    # Heat capacity ratio cp/cv [-]
@@ -81,6 +85,8 @@ FIELDS_SINGLE_PHASE_ONLY = [
     "dh_drho_T",  # (dh/drho) at const T [J*m^3/kg^2]
     "ds_drho_T",  # (ds/drho) at const T [J*m^3/kg^2/K]
 ]
+# Subset of FIELDS_THERMO that is NaN inside the dome.
+FIELDS_SINGLE_PHASE_ONLY = ["cp", "Y", "a", "IPLE"]
 FIELDS_SAT_ONLY = [
     # Saturated queries only (NaN for all others). Total derivatives along the
     # saturation curve, not partials:
@@ -90,7 +96,7 @@ FIELDS_SAT_ONLY = [
     "dhsat_dT",   # Enthalpy slope [J/kg/K]
     "dusat_dT",   # Internal energy slope [J/kg/K]
 ]
-FIELDS = FIELDS + FIELDS_SINGLE_PHASE_ONLY + FIELDS_SAT_ONLY
+FIELDS = FIELDS + FIELDS_THERMO + FIELDS_SAT_ONLY
 N2O_Properties = cacher.cls_Result(FIELDS)
 
 
@@ -190,6 +196,44 @@ def _common(st, out):
     out["u"] = st.umass()
     out["Z"] = st.compressibility_factor()
 
+def _mixture_partials(sat, T, rho, out):
+    """Equilibrium-mixture cv and partial derivatives inside the dome, from the
+    saturated states and their slopes along the saturation curve. With
+    v = 1/rho, X = (v - v_l)/v_fg and phi = phi_l + X*phi_fg (phi in u, h, s):
+        (dphi/drho)_T = -phi_fg / (rho^2 * v_fg)
+        (dphi/dT)_rho = phi_l' + X*phi_fg' + phi_fg * dX/dT,
+            dX/dT = -(v_l' + X*v_fg') / v_fg
+        (dP/dT)_rho = dPsat/dT,  (dP/drho)_T = 0,  cv = (du/dT)_rho
+    where ' is the derivative along the saturation curve."""
+    fsd = sat.first_saturation_deriv
+    sides = []
+    for Q in (0.0, 1.0):
+        sat.unspecify_phase()
+        sat.update(CoolProp.QT_INPUTS, Q, T)
+        sides.append(dict(
+            v=1.0/sat.rhomass(),
+            dv=-fsd(CoolProp.iDmass, CoolProp.iT) / sat.rhomass()**2,
+            u=sat.umass(), du=fsd(CoolProp.iUmass, CoolProp.iT),
+            h=sat.hmass(), dh=fsd(CoolProp.iHmass, CoolProp.iT),
+            s=sat.smass(), ds=fsd(CoolProp.iSmass, CoolProp.iT),
+            dP=fsd(CoolProp.iP, CoolProp.iT),
+        ))
+    l, v = sides
+    vfg = v["v"] - l["v"]
+    X = (1.0/rho - l["v"]) / vfg
+    dXdT = -(l["dv"] + X*(v["dv"] - l["dv"])) / vfg
+    def dT_rho(k):
+        return l["d" + k] + X*(v["d" + k] - l["d" + k]) + (v[k] - l[k])*dXdT
+    def drho_T(k):
+        return -(v[k] - l[k]) / (rho*rho*vfg)
+    out["cv"] = dT_rho("u")
+    out["dP_dT_rho"] = l["dP"]
+    out["dP_drho_T"] = 0.0
+    out["du_drho_T"] = drho_T("u")
+    out["dh_dT_rho"] = dT_rho("h")
+    out["dh_drho_T"] = drho_T("h")
+    out["ds_drho_T"] = drho_T("s")
+
 def _quality(sat, T, rho):
     if T >= Tcrit:
         return math.nan
@@ -210,7 +254,9 @@ def _query(st, sat, T, rho):
     st.update(CoolProp.DmassT_INPUTS, rho, T)
     _common(st, out)
     inside_dome = (T < Tcrit) and (0.0 < X < 1.0)
-    if not inside_dome:
+    if inside_dome:
+        _mixture_partials(sat, T, rho, out)
+    else:
         _single_phase(st, out)
     return out
 
