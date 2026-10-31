@@ -11,6 +11,7 @@
 #define N2O_Pmax    (15000000.0)
 #define N2O_rhomin  (1.0)
 #define N2O_Tsat_hi (309.51067823146286)
+#define N2O_Psat_hi (7243214.29339227)
 
 // Fields present in the saturated (1D) tables.
 #define N2O_TBL_SAT_FIELDS(X) \

@@ -45,11 +45,12 @@ __all__ = [
     "FIELDS", "FIELDS_THERMO", "FIELDS_SAT_ONLY", "FIELDS_SINGLE_PHASE_ONLY", "N2O_Properties",
     "N2O", "N2Osatliq", "N2Osatvap",
     "Ttrip", "Ptrip", "Tcrit", "Pcrit", "rhocrit", "Mw", "R",
-    "Tmin", "Tmax", "Pmax", "rhomin", "Tsat_hi",
+    "Tmin", "Tmax", "Pmax", "rhomin", "Tsat_hi", "Psat_hi", "Them_lo",
     "rho_split_l", "rho_split_v", "rho_dense_max",
     "rho_from_dense_psi", "rho_from_light_psi",
     "psi_dense", "psi_light",
     "query", "query_sat", "query_dense", "query_light",
+    "Tsat", "hem_choke_T_sat",
 ]
 
 
@@ -120,6 +121,10 @@ rhomin = 1.0       # [kg/m^3]
 # Saturated tables stop just short of the critical point, where saturated
 # properties are singular.
 Tsat_hi = Tcrit - 0.01
+Psat_hi = CP.PropsSI("P", "T", Tsat_hi, "Q", 0, _FLUID) # Psat(Tsat_hi) [Pa]
+# Lower end of the tabulated HEM choke: the choke sits ~1-20 K below the inlet
+# temperature, and the root needs some room above the triple point to bracket.
+Them_lo = Ttrip + 2.0
 
 
 def _new_state():
@@ -351,6 +356,79 @@ def query_light(T, psi):
     except ValueError:
         return np.full(len(FIELDS), math.nan)
     return _safe_arr(_query_side, _st, _st_sat, T, rho, False)
+
+
+# -------------------------------------------------------------------------------
+# Saturation temperature and the saturated-inlet HEM choke.
+
+def Tsat(P):
+    """Saturation temperature [K] at pressure P [Pa], Ptrip <= P < Pcrit."""
+    _st_sat.unspecify_phase()
+    _st_sat.update(CoolProp.PQ_INPUTS, float(P), 0.0)
+    return _st_sat.T()
+
+def _sonic_resid(s_u, h_u, T):
+    """V^2 - a_eq^2 for an isentropic HEM expansion from (s_u, h_u) to
+    saturation temperature T, with
+        V^2 = 2*(h_u - h),  a_eq^2 = -v^2 * Psat'(T) / (dv/dT)_s,
+        v = v_l + X*v_fg,  X = (s_u - s_l)/s_fg,  X' = -(s_l' + X*s_fg')/s_fg,
+        (dv/dT)_s = v_l' + X*v_fg' + v_fg*X'
+    (' = d/dT along saturation). Its root is the HEM choke."""
+    sides = []
+    for Q in (0.0, 1.0):
+        _st_sat.unspecify_phase()
+        _st_sat.update(CoolProp.QT_INPUTS, Q, T)
+        fsd = _st_sat.first_saturation_deriv
+        rho = _st_sat.rhomass()
+        sides.append(dict(
+            v=1.0/rho, dv=-fsd(CoolProp.iDmass, CoolProp.iT)/rho**2,
+            s=_st_sat.smass(), ds=fsd(CoolProp.iSmass, CoolProp.iT),
+            h=_st_sat.hmass(), dP=fsd(CoolProp.iP, CoolProp.iT),
+        ))
+    l, v = sides
+    sfg = v["s"] - l["s"]
+    X = (s_u - l["s"]) / sfg
+    dX = -(l["ds"] + X*(v["ds"] - l["ds"])) / sfg
+    vm = l["v"] + X*(v["v"] - l["v"])
+    dvm = l["dv"] + X*(v["dv"] - l["dv"]) + (v["v"] - l["v"])*dX
+    a2 = -vm*vm * l["dP"] / dvm
+    h = l["h"] + X*(v["h"] - l["h"])
+    return 2.0*(h_u - h) - a2
+
+def hem_choke_T_sat(T_u):
+    """HEM choke exit (saturation) temperature [K] for a saturated-liquid inlet
+    at T_u: where the isentropic flow speed reaches the equilibrium sound
+    speed. The same point as the maximum mass flux, but found as a root (well-
+    conditioned) rather than as a maximum (flat, so a search there wanders over
+    ~1 K and drags the exit quality with it). NaN if no root is bracketed."""
+    T_u = float(T_u)
+    _st_sat.unspecify_phase()
+    _st_sat.update(CoolProp.QT_INPUTS, 0.0, T_u)
+    s_u = _st_sat.smass()
+    h_u = _st_sat.hmass()
+    # Illinois false position; f > 0 far below T_u (V large, a_eq small),
+    # f < 0 just below T_u (V -> 0).
+    lo, hi = Ttrip + 0.01, T_u - 1e-4
+    flo, fhi = _sonic_resid(s_u, h_u, lo), _sonic_resid(s_u, h_u, hi)
+    if not (flo > 0.0 > fhi):
+        return math.nan
+    side = 0
+    for _ in range(200):
+        T = (lo*fhi - hi*flo) / (fhi - flo)
+        f = _sonic_resid(s_u, h_u, T)
+        if f > 0.0:
+            lo, flo = T, f
+            if side == +1:
+                fhi *= 0.5
+            side = +1
+        else:
+            hi, fhi = T, f
+            if side == -1:
+                flo *= 0.5
+            side = -1
+        if hi - lo < 1e-9:
+            break
+    return 0.5*(lo + hi)
 
 
 # -------------------------------------------------------------------------------

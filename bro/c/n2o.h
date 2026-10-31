@@ -110,3 +110,11 @@ f64 N2O_satvap_drhosat_dT(f64 T);
 f64 N2O_satvap_dssat_dT(f64 T);
 f64 N2O_satvap_dhsat_dT(f64 T);
 f64 N2O_satvap_dusat_dT(f64 T);
+
+
+// HEM choke exit (saturation) temperature for an isentropic expansion of
+// saturated liquid at T_u: where the flow speed reaches the equilibrium sound
+// speed (equivalently, the maximum HEM mass flux). NaN outside the tabulated
+// range [~Ttrip + 2 K, N2O_Tsat_hi]. Saturated inlets only: a compressed-liquid
+// inlet's choke depends on (T, rho), not T alone.
+f64 N2O_satliq_T_chokeHEM(f64 T_u);

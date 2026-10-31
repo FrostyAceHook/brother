@@ -22,10 +22,8 @@
 
 // Some (tweakable) system constants.
 
-static const f64 startup_Dt = 0.1e-3;
-static const f64 comb_Dt = 0.4e-3;
+static const f64 comb_Dt = 2.5e-3;
 static const f64 gotime_Dt = 50e-3;
-static const f64 startup_max_t = 0.2; // startup length of all systems.
 static const f64 comb_max_t = 50.0; // failsafe.
 static const f64 max_t = 1000.0; // failsafe.
 static const f64 negligible_m = 2e-3; // assume nothing if mass <= this.
@@ -202,7 +200,7 @@ static CCstate cc_solve(const CCctx* c, f64 P_t, f64 P_hint) {
         f64 inflow = m.dm_inj + m.dm_reg;
 
         // Converged when accurate mass balance or tiny bracket.
-        if (abs(m.resid) <= 1e-7*inflow || hi.P_c - lo.P_c < 1.0)
+        if (abs(m.resid) <= 1e-5*inflow || hi.P_c - lo.P_c < 1.0)
             return m;
 
         if (m.resid > 0.0) {
@@ -484,10 +482,8 @@ static void sim_diff(simState* s, simRunning* rstr rn,
         // the higher atmospheric pressure dominates.
         Thrust = max(Thrust, 0.0);
 
-        // Assume that combustion stops when ofr becomes too extreme (but only
-        // after startup).
-        if (t > startup_max_t)
-            onfire = within(cc.ofr, comb_min_ofr, comb_max_ofr);
+        // Assume that combustion stops when ofr becomes too extreme.
+        onfire = within(cc.ofr, comb_min_ofr, comb_max_ofr);
     } else {
         // Assume no thrust without combustion (i.e. ignore any residual thrust
         // from still-pressurised tank/cc).
@@ -534,9 +530,7 @@ enum {
 };
 static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     // Different time step sizes for different periods.
-    f64 Dt = (rn->t <= startup_max_t) ? startup_Dt
-           : (rn->onfire) ? comb_Dt
-           : gotime_Dt; // gotime.
+    f64 Dt = (rn->onfire) ? comb_Dt : gotime_Dt; // gotime.
 
     // Stop sim when combustion stops.
     i32 stop = (!rn->onfire);
@@ -563,6 +557,7 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
                 .rr_f  = prev.rr_f  + rk4_Dt * d->rr_f,
                 .alt_r = prev.alt_r + rk4_Dt * d->alt_r,
                 .vel_r = prev.vel_r + rk4_Dt * d->vel_r,
+                .P_c_hint = rn->P_c_hint, // keep latest solve as hint.
             };
         }
         sim_diff(s, rn, derivatives + i);

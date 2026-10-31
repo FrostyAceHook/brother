@@ -5,15 +5,19 @@
 #include "maths.h"
 
 // Generated tables. Each defines its axes (lutAxis) and one named f32 array per
-// field (N2O_<group>_<field>_tbl).
+// field (N2O_<group>_<field>_tbl):
 //   N2O_sat.i    N2O_SAT_AXIS (T, cbrt about Tcrit)
 //   N2O_bound.i  N2O_BOUND_AXIS (T, linear)
 //   N2O_dense.i  N2O_DENSE_T_AXIS (T, sqrt about Tcrit), N2O_DENSE_PSI_AXIS
 //   N2O_light.i  N2O_LIGHT_T_AXIS (T, sqrt about Tcrit), N2O_LIGHT_PSI_AXIS
+//   N2O_tsat.i   N2O_TSAT_AXIS (P, log)
+//   N2O_hem.i    N2O_HEM_AXIS (T, cbrt about Tcrit)
 #include "tbl/N2O_sat.i"
 #include "tbl/N2O_bound.i"
 #include "tbl/N2O_dense.i"
 #include "tbl/N2O_light.i"
+#include "tbl/N2O_tsat.i"
+#include "tbl/N2O_hem.i"
 
 
 
@@ -46,18 +50,19 @@ f64 N2O_Psat(f64 T) {
 
 f64 N2O_Tsat(f64 P) {
     assert(N2O_Ptrip <= P && P < N2O_Pcrit, "N2O Tsat input oob: P=%g", P);
-    // Initial guess from ln(P) linear in 1/T between the triple and critical
-    // points (Clausius-Clapeyron shape), then Newton on the saturated table.
-    f64 B = log2(N2O_Pcrit / N2O_Ptrip) / (1.0/N2O_Ttrip - 1.0/N2O_Tcrit);
-    f64 T = 1.0 / (1.0/N2O_Ttrip - log2(P / N2O_Ptrip) / B);
-    for (i32 iter=0; iter<30; ++iter) {
-        T = min(max(T, N2O_Ttrip), N2O_SAT_AXIS.hi);
-        f64 dT = (N2O_satliq_P(T) - P) / N2O_satliq_dPsat_dT(T);
-        T -= dT;
-        if (abs(dT) < 1e-9)
-            break;
-    }
-    return min(max(T, N2O_Ttrip), N2O_SAT_AXIS.hi);
+    if (P <= N2O_TSAT_AXIS.hi)
+        return lut1(N2O_tsat_T_tbl, &N2O_TSAT_AXIS, P);
+    // Untabulated sliver [Psat_hi, Pcrit): blend to the critical point.
+    f64 T_hi = (f64)N2O_tsat_T_tbl[N2O_TSAT_AXIS.n - 1];
+    f64 x = (P - N2O_TSAT_AXIS.hi) / (N2O_Pcrit - N2O_TSAT_AXIS.hi);
+    return lerp(T_hi, N2O_Tcrit, x);
+}
+
+
+f64 N2O_satliq_T_chokeHEM(f64 T_u) {
+    if (!lut_inside(&N2O_HEM_AXIS, T_u, 0.0))
+        return NAN;
+    return lut1(N2O_hem_Tchoke_tbl, &N2O_HEM_AXIS, T_u);
 }
 
 

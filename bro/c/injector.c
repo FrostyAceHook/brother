@@ -151,14 +151,14 @@ HoleN2OU hole_N2OU(const HoleN2O* hole) {
     // most accurate tables: the dense table's absolute h error (~10 J/kg) would
     // otherwise be a few % of the drop near P_u. The offset form cancels the
     // dense table's error at psi = 0 exactly.
-    f64 rho_sat = N2O_satliq_rho(T_u);
-    f64 rho_u = max(hole->rho_u, rho_sat);
+    f64 rho_satliq = N2O_satliq_rho(T_u);
+    f64 rho_u = max(hole->rho_u, rho_satliq);
     up.s_u = N2O_satliq_s(T_u);
     up.h_u = N2O_satliq_h(T_u);
     up.IPLE_u = N2O_satliq_IPLE(T_u);
-    if (rho_u > rho_sat) {
-        up.s_u += N2O_s(T_u, rho_u) - N2O_s(T_u, rho_sat);
-        up.h_u += N2O_h(T_u, rho_u) - N2O_h(T_u, rho_sat);
+    if (rho_u > rho_satliq) {
+        up.s_u += N2O_s(T_u, rho_u) - N2O_s(T_u, rho_satliq);
+        up.h_u += N2O_h(T_u, rho_u) - N2O_h(T_u, rho_satliq);
         up.IPLE_u = N2O_IPLE(T_u, rho_u);
     }
     f64 n = up.IPLE_u;
@@ -177,7 +177,13 @@ HoleN2OU hole_N2OU(const HoleN2O* hole) {
         up.dm_chokeHEM = NAN;
         up.k_chokeFML = NAN;
     } else {
-        up.T_d_chokeHEM = get_T_chokeHEM(up.s_u, up.h_u, T_u);
+        // Use the lut for saturated inlets, otherwise search.
+        f64 T_d_sat_chokeHEM = (rho_u == rho_satliq)
+                             ? N2O_satliq_T_chokeHEM(T_u)
+                             : NAN;
+        up.T_d_chokeHEM = (notnan(T_d_sat_chokeHEM))
+                        ? T_d_sat_chokeHEM
+                        : get_T_chokeHEM(up.s_u, up.h_u, T_u);
         up.P_d_chokeHEM = N2O_Psat(up.T_d_chokeHEM);
         HemExit_ e = hem_exit_(up.s_u, up.h_u, up.T_d_chokeHEM);
         up.X_chokeHEM = e.X;

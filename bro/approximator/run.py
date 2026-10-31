@@ -137,6 +137,10 @@ N2O_AXES = dict(
     bound=LutAxis(n2o.Ttrip, n2o.Tmax, 400),
     T2d=LutAxis(n2o.Ttrip, n2o.Tmax, 220, scale="sqrt", c=n2o.Tcrit),
     psi=LutAxis(0.0, 1.0, 100),
+    # Tsat(P): ln(P) ~ -1/T (Clausius-Clapeyron), so T is smooth in log(P).
+    tsat=LutAxis(n2o.Ptrip, n2o.Psat_hi, 1000, scale="log"),
+    # Saturated-inlet HEM choke temperature vs inlet temperature.
+    hem=LutAxis(n2o.Them_lo, n2o.Tsat_hi, 400, scale="cbrt", c=n2o.Tcrit),
 )
 
 # Fields tabulated in the 2D single-phase tables. T and rho are inputs, X is
@@ -195,11 +199,15 @@ def _err_summary(truth, approx, keep=None):
 class N2OTable1D:
     """Several 1D LUTs (one per field) sharing one T axis."""
 
-    def __init__(self, prefix, func, fields, axis):
+    def __init__(self, prefix, func, fields, axis, x_crit=None, band=None):
         self.prefix = prefix
-        self.func = func          # T -> array ordered as `fields`
+        self.func = func          # x -> array ordered as `fields`
         self.fields = fields
         self.axis = axis
+        # Errors are also reported excluding |x - x_crit| <= band (defaults:
+        # the critical temperature band, for T axes).
+        self.x_crit = n2o.Tcrit if x_crit is None else x_crit
+        self.band = N2O_CRIT_BAND if band is None else band
         self.T = axis.nodes()
         self.values = np.array([func(T) for T in self.T]) # (n, nfields)
 
@@ -210,7 +218,7 @@ class N2OTable1D:
         """C text: the axis (`<GROUP>_AXIS`) and one named f32 array per
         field."""
         G = group.upper()
-        lines = [f"/* {self.prefix}: 1D LUTs in T, {self.axis.describe()}. */"]
+        lines = [f"/* {self.prefix}: 1D LUTs, {self.axis.describe()}. */"]
         if axis:
             lines += [f"static const lutAxis {G}_AXIS = {self.axis.c_init()};",
                       ""]
@@ -225,15 +233,15 @@ class N2OTable1D:
     def run(self):
         Tmid = self.axis.mids()
         truth = np.array([self.func(T) for T in Tmid])
-        keep = np.abs(Tmid - n2o.Tcrit) > N2O_CRIT_BAND
+        keep = np.abs(Tmid - self.x_crit) > self.band
         print(f"    /* {self.prefix}: {self.axis.describe()} */")
         for k, field in enumerate(self.fields):
             approx = self(k, Tmid)
             e_all = _err_summary(truth[:, k], approx)
             e_op = _err_summary(truth[:, k], approx, keep)
             print(f"    /*   {field:>11}: max err {e_all[0]*100:7.3f}% "
-                  f"(of range {e_all[1]*100:7.3f}%), excl. Tcrit+-"
-                  f"{N2O_CRIT_BAND:g}K {e_op[0]*100:8.5f}% */")
+                  f"(of range {e_all[1]*100:7.3f}%), excl. crit+-"
+                  f"{self.band:g} {e_op[0]*100:8.5f}% */")
 
 
 class N2OTable2D:
@@ -338,6 +346,7 @@ def _n2o_consts():
         f"#define N2O_Pmax    ({n2o.Pmax!r})",
         f"#define N2O_rhomin  ({n2o.rhomin!r})",
         f"#define N2O_Tsat_hi ({n2o.Tsat_hi!r})",
+        f"#define N2O_Psat_hi ({n2o.Psat_hi!r})",
         "",
         "// Fields present in the saturated (1D) tables.",
     ] + xmacro("N2O_TBL_SAT_FIELDS", N2O_FIELDS_SAT) + [
@@ -363,7 +372,13 @@ def gen_n2o_tables(axes=None):
     light = N2OTable2D("N2O_light", n2o.query_light, N2O_FIELDS_2D, idx_2d,
             axes["T2d"], axes["psi"])
 
-    for tbl in (satliq, satvap, bound, dense, light):
+    tsat = N2OTable1D("N2O_tsat", lambda P: np.array([n2o.Tsat(P)]),
+            ["T"], axes["tsat"], x_crit=n2o.Pcrit, band=3e5)
+    hem = N2OTable1D("N2O_hem",
+            lambda T: np.array([n2o.hem_choke_T_sat(T)]),
+            ["Tchoke"], axes["hem"])
+
+    for tbl in (satliq, satvap, bound, tsat, hem, dense, light):
         tbl.run()
 
     _n2o_consts()
@@ -371,10 +386,13 @@ def gen_n2o_tables(axes=None):
     _write_tbl("N2O_sat", satliq.c_source("N2O_SAT")
                         + satvap.c_source("N2O_SAT", axis=False))
     _write_tbl("N2O_bound", bound.c_source("N2O_BOUND"))
+    _write_tbl("N2O_tsat", tsat.c_source("N2O_TSAT"))
+    _write_tbl("N2O_hem", hem.c_source("N2O_HEM"))
     _write_tbl("N2O_dense", dense.c_source("N2O_DENSE"))
     _write_tbl("N2O_light", light.c_source("N2O_LIGHT"))
 
-    print("    /* N2O tables written: tbl/N2O_{consts,sat,bound,dense,light}.i */")
+    print("    /* N2O tables written: "
+          "tbl/N2O_{consts,sat,bound,tsat,hem,dense,light}.i */")
     print("")
 
 
@@ -612,11 +630,11 @@ def _run():
                 print(f"{title}: {dt:.6f} s "
                       f"({count} iters; too fast to extrapolate)")
 
-    # with timer("N2O"):
-    #     gen_n2o_tables()
+    with timer("N2O"):
+        gen_n2o_tables()
 
-    with timer("CEA"):
-        gen_cea_tables()
+    # with timer("CEA"):
+    #     gen_cea_tables()
 
 
 
