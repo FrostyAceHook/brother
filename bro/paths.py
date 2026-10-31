@@ -3,10 +3,12 @@ Various important paths + manip.
 """
 
 import functools
+import inspect
 import os
 import shutil
 import sys
 from pathlib import Path
+from types import ModuleType
 
 # Platform-specific locking
 if os.name == "nt":
@@ -27,6 +29,26 @@ def shortstr(path):
 
 def isopen(file):
     return file is not None and not file.closed
+
+
+def pyname(target=None, root=None):
+    if root is None:
+        root = ROOT
+    if target is None:
+        target = inspect.stack()[1].filename
+    elif isinstance(target, ModuleType):
+        if getattr(target, "__file__", None) is None:
+            raise ValueError(f"{target.__name__} has no file (built-in module?)")
+        target = target.__file__
+
+    path = Path(target).resolve()
+    try:
+        parts = list(path.relative_to(root).with_suffix("").parts)
+    except ValueError:
+        return path.stem
+    if parts and parts[-1] in ("__init__", "__main__"):
+        parts.pop()
+    return ".".join(parts) or root.name
 
 
 def subfiles(directory, ext="", recursive=True, as_str=False, as_rel=False):

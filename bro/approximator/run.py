@@ -414,7 +414,7 @@ CEA_FIELDS = [
     ("rho",   "rho",   "density [kg/m^3]"),
     ("M",     "mach",  "Mach number [-]"),
     ("a",     "son",   "speed of sound [m/s]"),
-    ("gamma", "gamma", "ratio of specific heats [-]"),
+    ("Y",     "gamma", "ratio of specific heats [-]"),
     ("cp",    "cp",    "isobaric heat capacity"),
     ("mu",    "visc",  "dynamic viscosity"),
     ("Pr",    "pran",  "Prandtl number [-]"),
@@ -612,8 +612,8 @@ def _run():
                 print(f"{title}: {dt:.6f} s "
                       f"({count} iters; too fast to extrapolate)")
 
-    with timer("N2O"):
-        gen_n2o_tables()
+    # with timer("N2O"):
+    #     gen_n2o_tables()
 
     with timer("CEA"):
         gen_cea_tables()

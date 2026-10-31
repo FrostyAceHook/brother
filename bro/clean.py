@@ -46,5 +46,5 @@ def clean():
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        raise RuntimeError("bruv.clean does not have command line args")
+        raise RuntimeError(f"{paths.pyname()} does not have command line args")
     sys.exit(clean())

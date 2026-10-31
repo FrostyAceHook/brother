@@ -29,9 +29,9 @@ static const ceaTable_ cea_cc_a_tbls_[CEA_PROP_COUNT] = {
         &cea_n2o_paraffin_cc_grid_
     },
 };
-static const ceaTable_ cea_cc_gamma_tbls_[CEA_PROP_COUNT] = {
+static const ceaTable_ cea_cc_Y_tbls_[CEA_PROP_COUNT] = {
     [CEA_N2O_PARAFFIN] = {
-        cea_n2o_paraffin_cc_gamma_tbl,
+        cea_n2o_paraffin_cc_Y_tbl,
         &cea_n2o_paraffin_cc_grid_
     },
 };
@@ -89,9 +89,9 @@ static const ceaTable_ cea_tht_a_tbls_[CEA_PROP_COUNT] = {
         &cea_n2o_paraffin_tht_grid_
     },
 };
-static const ceaTable_ cea_tht_gamma_tbls_[CEA_PROP_COUNT] = {
+static const ceaTable_ cea_tht_Y_tbls_[CEA_PROP_COUNT] = {
     [CEA_N2O_PARAFFIN] = {
-        cea_n2o_paraffin_tht_gamma_tbl,
+        cea_n2o_paraffin_tht_Y_tbl,
         &cea_n2o_paraffin_tht_grid_
     },
 };
@@ -140,7 +140,7 @@ static const ceaTable_ cea_sup_M_tbls_[CEA_PROP_COUNT] = {
 static const ceaTable_ cea_sup_a_tbls_[CEA_PROP_COUNT] = {
     [CEA_N2O_PARAFFIN] = { NULL, NULL },
 };
-static const ceaTable_ cea_sup_gamma_tbls_[CEA_PROP_COUNT] = {
+static const ceaTable_ cea_sup_Y_tbls_[CEA_PROP_COUNT] = {
     [CEA_N2O_PARAFFIN] = { NULL, NULL },
 };
 static const ceaTable_ cea_sup_cp_tbls_[CEA_PROP_COUNT] = {
@@ -176,7 +176,7 @@ static const ceaTable_ cea_sub_M_tbls_[CEA_PROP_COUNT] = {
 static const ceaTable_ cea_sub_a_tbls_[CEA_PROP_COUNT] = {
     [CEA_N2O_PARAFFIN] = { NULL, NULL },
 };
-static const ceaTable_ cea_sub_gamma_tbls_[CEA_PROP_COUNT] = {
+static const ceaTable_ cea_sub_Y_tbls_[CEA_PROP_COUNT] = {
     [CEA_N2O_PARAFFIN] = { NULL, NULL },
 };
 static const ceaTable_ cea_sub_cp_tbls_[CEA_PROP_COUNT] = {

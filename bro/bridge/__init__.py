@@ -5,8 +5,13 @@ Proxy module for the bridge cython, lazy-loading all symbols.
 import importlib
 import os
 import sys
+from pathlib import Path
 
 from .. import paths
+
+# Just for module names, cleaning and building are not performed on this import:
+from .. import clean
+from .. import build
 
 
 _bridge_module = None # cache loaded bridge.
@@ -19,7 +24,8 @@ def _load_bridge():
     if _bridge_module is not None:
         return _bridge_module
 
-    howtobuild = "run 'py -m bruv.build'"
+    howtobuild = "run "\
+        f"'py -m {paths.pyname(clean)} & py -m {paths.pyname(build)}'"
 
     # Check bin dirs exist.
     if not paths.BIN_C.is_dir() or not paths.BIN_BRIDGE.is_dir():
@@ -38,7 +44,7 @@ def _load_bridge():
         os.add_dll_directory(str(paths.BIN_C.resolve()))
 
     # Do the actual import.
-    name = f"bruv.bridge.{paths.BRIDGE_MODULE_NAME}"
+    name = f"bridge.{paths.BRIDGE_MODULE_NAME}"
     spec = importlib.util.spec_from_file_location(name, bridge_path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
