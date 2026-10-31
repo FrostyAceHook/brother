@@ -40,14 +40,13 @@ def get_interpretation():
     interp.append("m0_o", interp.F64, IN | OUT)
     interp.append("vff0_l", interp.F64, IN | OUT)
 
-    interp.append("Ot_mov", interp.F64, IN)
-
     interp.append("model_inj", interp.I64, IN)
     interp.append("Cd_inj", interp.F64, IN)
     interp.append("no_injo", interp.F64, IN | OUT)
     interp.append("D_injo", interp.F64, IN | OUT)
     interp.append("Deq_injo", interp.F64, IN | OUT)
     interp.append("A_injo", interp.F64, OUT)
+    interp.append("CdA_inj", interp.F64, OUT)
 
     interp.append("etaCstar", interp.F64, IN)
     interp.append("etaCf", interp.F64, IN)
@@ -74,10 +73,6 @@ def get_interpretation():
     interp.append("out_T_o", interp.PTR_F64, IN | OUTDATA)
     interp.append("out_m_o", interp.PTR_F64, IN | OUTDATA)
     interp.append("out_rr_f", interp.PTR_F64, IN | OUTDATA)
-    interp.append("out_m_g", interp.PTR_F64, IN | OUTDATA)
-    interp.append("out_N_g", interp.PTR_F64, IN | OUTDATA)
-    interp.append("out_Cv_g", interp.PTR_F64, IN | OUTDATA)
-    interp.append("out_U_g", interp.PTR_F64, IN | OUTDATA)
     interp.append("out_alt_r", interp.PTR_F64, IN | OUTDATA)
     interp.append("out_vel_r", interp.PTR_F64, IN | OUTDATA)
 
@@ -100,8 +95,6 @@ def get_state(interp):
     state["T0_o"] = 273.15 + 14.0
     state["m0_o"] = nan
     state["vff0_l"] = 1.0
-
-    state["Ot_mov"] = 0.01
 
     state["model_inj"] = 3
     state["Cd_inj"] = 0.65
@@ -130,10 +123,6 @@ def get_state(interp):
     state["out_T_o"] = new_out()
     state["out_m_o"] = new_out()
     state["out_rr_f"] = new_out()
-    state["out_m_g"] = new_out()
-    state["out_N_g"] = new_out()
-    state["out_Cv_g"] = new_out()
-    state["out_U_g"] = new_out()
     state["out_alt_r"] = new_out()
     state["out_vel_r"] = new_out()
 
@@ -175,21 +164,14 @@ def now_this_is_brother():
     get = lambda k: get_out(k)[:n]
     t = get("t")
 
-    names = ["T_o", "m_o", "rr_f", "m_g", "N_g", "Cv_g", "U_g", "alt_r", "vel_r"]
-    fig, axs = plt.subplots(4, 3, figsize=(14, 12), sharex=True)
+    names = ["T_o", "m_o", "rr_f", "alt_r", "vel_r"]
+    fig, axs = plt.subplots(2, 3, figsize=(14, 12), sharex=True)
     axs = axs.ravel()
     for ax, k in zip(axs, names):
         ax.plot(t, get(k))
         ax.set_title(k)
         ax.grid(alpha=0.3)
 
-    # Derived: chamber gas temperature.
-    axs[len(names)].plot(t, get("U_g") / get("Cv_g"))
-    axs[len(names)].set_title("T_g = U_g/Cv_g")
-    axs[len(names)].grid(alpha=0.3)
-
-    for ax in axs[len(names) + 1:]:
-        ax.axis("off")
     for ax in axs[-3:]:
         ax.set_xlabel("t [s]")
     fig.tight_layout()

@@ -16,6 +16,10 @@
 
 
 
+// =========================================================================== //
+// = CONSTANTS =============================================================== //
+// =========================================================================== //
+
 // Some (tweakable) system constants.
 
 static const f64 startup_Dt = 0.1e-3;
@@ -31,18 +35,19 @@ static const f64 min_peak_P_c = 5e5; // ballpark.
 
 
 
+// =========================================================================== //
+// = STATE HELPERS =========================================================== //
+// =========================================================================== //
+
 typedef struct simRunning { // time-dependant constantly-updating parameters.
     i64 onfire;
     f64 t;
     f64 T_o;
     f64 m_o;
     f64 rr_f;
-    f64 m_g;
-    f64 N_g;
-    f64 Cv_g;
-    f64 U_g;
     f64 alt_r;
     f64 vel_r;
+    f64 P_c_hint; // cc pressure solved each step, use prev as seed.
 } simRunning;
 
 typedef struct simPrev { // previous-tick values, for integration.
@@ -64,6 +69,167 @@ static Grain* init_grain(Grain* g, simState* s, f64 rr) {
 
 
 
+
+// =========================================================================== //
+// = INJECTOR FLOW =========================================================== //
+// =========================================================================== //
+
+// Cached injector flow state (jus like me rn).
+typedef struct InjFlow {
+    i32 liquid_draining;
+    union {
+        HoleN2OU liq;
+        HoleU gas;
+    };
+} InjFlow;
+
+static f64 inj_flow(const InjFlow* inj, f64 P_d) {
+    return (inj->liquid_draining)
+         ? hole_N2OU_dm(&inj->liq, P_d)
+         : holeU_dm(&inj->gas, P_d);
+}
+
+
+
+
+// =========================================================================== //
+// = CC PRESSURE ============================================================= //
+// =========================================================================== //
+
+// Quasi-steady chamber: its filling time (~2-3 ms) is ~1000x below the burn
+// time, so the chamber is always in mass balance. P_c is the root of
+//  resid(P_c) = dm_out(P_c) - dm_inj(P_c) - dm_reg(dm_inj(P_c)),
+// which increases with P_c, is <= 0 at P_a (no nozzle flow) and > 0 at P_t (no
+// injector flow), so exactly one root lies in [P_a, P_t].
+
+// Everything the balance needs that's fixed for one state.
+typedef struct CCctx {
+    const simState* s;
+    const InjFlow* inj; // null if no oxidiser left.
+    f64 P_a;
+    i32 regressing;
+    f64 Aneg_f;
+    f64 dm_per_drr;
+} CCctx;
+
+// Chamber state at a candidate pressure.
+typedef struct CCstate {
+    f64 P_c;
+    f64 dm_inj;
+    f64 dm_reg;
+    f64 drr_f;
+    f64 ofr;
+    f64 P_cea;   // P_c clamped into the CEA domain
+    f64 ofr_cea; // ofr clamped into the CEA domain
+    f64 T_g;
+    f64 R_g;
+    f64 Y_g;
+    f64 dm_out;
+    f64 resid; // dm_out - dm_inj - dm_reg
+} CCstate;
+
+static CCstate cc_eval(const CCctx* c, f64 P_c) {
+    const simState* s = c->s;
+    CCstate e;
+    e.P_c = P_c;
+    e.dm_inj = (c->inj) ? inj_flow(c->inj, P_c) : 0.0;
+
+    // Regression from the oxidiser mass flux through the port. Fuel mass flow
+    // is linear in the regression rate at fixed geometry, so only the
+    // regression law itself is evaluated per candidate.
+    if (c->regressing) {
+        e.drr_f = grain_drr(e.dm_inj / c->Aneg_f);
+        e.dm_reg = c->dm_per_drr * e.drr_f;
+    } else {
+        e.drr_f = 0.0;
+        e.dm_reg = 0.0;
+    }
+    e.ofr = (e.dm_reg > 0.0) ? (e.dm_inj / e.dm_reg) : 0.0;
+
+    // Products: adiabatic flame state at (P_c, ofr), clamped into the table
+    // domain, with C* efficiency as a temperature deficit (C* ~ sqrt(R*T)).
+    e.P_cea = min(max(P_c, CEA_min_P), CEA_max_P);
+    e.ofr_cea = min(max(e.ofr, CEA_min_ofr), CEA_max_ofr);
+    e.T_g = cea_T(e.P_cea, e.ofr_cea, CEA_AR_stag)
+          * s->etaCstar * s->etaCstar;
+    e.R_g = GAS_CONSTANT / cea_Mw(e.P_cea, e.ofr_cea, CEA_AR_stag);
+    e.Y_g = cea_Y(e.P_cea, e.ofr_cea, CEA_AR_stag);
+
+    e.dm_out = hole_dm(&(Hole){
+        .CdA = s->A_tht,
+        .P_u = P_c,
+        .P_d = c->P_a,
+        .Y = e.Y_g,
+        .R = e.R_g,
+        .T = e.T_g,
+        .Z = 1.0,
+    });
+    e.resid = e.dm_out - e.dm_inj - e.dm_reg;
+    return e;
+}
+
+// Solves for P_c in [P_a, P_t]. `P_hint` (previous solution, NaN for none) only
+// affects the iteration count.
+static CCstate cc_solve(const CCctx* c, f64 P_t, f64 P_hint) {
+    // Bracket over [P_a, P_t].
+    CCstate lo = cc_eval(c, c->P_a);
+    if (lo.resid >= 0.0 || P_t <= c->P_a)
+        return lo; // No injector mass flow, leave cc at P_a.
+    CCstate hi = cc_eval(c, P_t);
+    assert(hi.resid > 0.0, "cc bracket: resid(P_t=%g)=%g", P_t, hi.resid);
+
+    // Tighten the bracket with the hint.
+    if (notnan(P_hint) && c->P_a < P_hint && P_hint < P_t) {
+        CCstate m = cc_eval(c, P_hint);
+        if (m.resid == 0.0)
+            return m;
+        if (m.resid < 0.0)
+            lo = m;
+        else
+            hi = m;
+    }
+
+    // Illinois false position solving.
+    f64 flo = lo.resid;
+    f64 fhi = hi.resid;
+    enum { SIDE_NONE, SIDE_LO, SIDE_HI };
+    i32 side = SIDE_NONE; // no end kept yet, so no halving on the first step.
+    for (i32 iter=0; ; ++iter) {
+        enum { MAX_ITERS = 60 };
+
+        f64 P = (lo.P_c*fhi - hi.P_c*flo) / (fhi - flo);
+        CCstate m = cc_eval(c, P);
+        f64 inflow = m.dm_inj + m.dm_reg;
+
+        // Converged when accurate mass balance or tiny bracket.
+        if (abs(m.resid) <= 1e-7*inflow || hi.P_c - lo.P_c < 1.0)
+            return m;
+
+        if (m.resid > 0.0) {
+            hi = m;
+            fhi = m.resid;
+            if (side == SIDE_HI)
+                flo *= 0.5;
+            side = SIDE_HI;
+        } else {
+            lo = m;
+            flo = m.resid;
+            if (side == SIDE_LO)
+                fhi *= 0.5;
+            side = SIDE_LO;
+        }
+        assert(iter < MAX_ITERS, "cc solve failed to converge: P_c in [%g, %g]",
+                lo.P_c, hi.P_c);
+    }
+    __builtin_unreachable();
+}
+
+
+
+
+// =========================================================================== //
+// = INITIALISE ============================================================== //
+// =========================================================================== //
 
 static void sim_initial(simState* s, simRunning* rn) {
 
@@ -95,9 +261,6 @@ static void sim_initial(simState* s, simRunning* rn) {
     assert(s->m0_o >= 0, "m0_o=%g", s->m0_o);
 
 
-    assert(s->Ot_mov >= 0, "Ot_mov=%g", s->Ot_mov);
-
-
     assert(oneof(s->model_inj, HOLE_N2O_SPC, HOLE_N2O_HEM, HOLE_N2O_DYER,
             HOLE_N2O_FML), "model_inj=%lld", s->model_inj);
     assert(0 < s->Cd_inj && s->Cd_inj <= 1, "Cd_inj=%g", s->Cd_inj);
@@ -118,6 +281,7 @@ static void sim_initial(simState* s, simRunning* rn) {
     else
         s->Deq_injo = s->D_injo * sqrt(s->no_injo);
     s->A_injo = circ_area(s->Deq_injo);
+    s->CdA_inj = s->Cd_inj*s->A_injo;
 
 
     assert(0 < s->etaCstar && s->etaCstar <= 1, "etaCstar=%g", s->etaCstar);
@@ -163,10 +327,6 @@ static void sim_initial(simState* s, simRunning* rn) {
         s->out_T_o = NULL;
         s->out_m_o = NULL;
         s->out_rr_f = NULL;
-        s->out_m_g = NULL;
-        s->out_N_g = NULL;
-        s->out_Cv_g = NULL;
-        s->out_U_g = NULL;
         s->out_alt_r = NULL;
         s->out_vel_r = NULL;
     } else {
@@ -189,26 +349,18 @@ static void sim_initial(simState* s, simRunning* rn) {
     rn->T_o = s->T0_o; // initial temp given.
     rn->m_o = s->m0_o;
     rn->rr_f = 0;
-
-    // Chamber initially full of ambient air.
-    f64 P_a = amb_P(s->alt0_r);
-    f64 V0_g = s->Vempty_c - V0_f;
-    rn->m_g = P_a * V0_g / AMB_STANCOND_R / AMB_STANCOND_T;
-    rn->N_g = rn->m_g / AMB_STANCOND_Mw;
-    rn->Cv_g = rn->m_g * AMB_STANCOND_cv;
-    rn->U_g = rn->Cv_g * AMB_STANCOND_T;
-
-    // Starts stationary where specified.
-    rn->alt_r = s->alt0_r;
-    rn->vel_r = 0;
+    rn->alt_r = s->alt0_r; // launch altitude given.
+    rn->vel_r = 0; // start stationary (dont model the onboard we sacrificed
+                   // giving it a push).
 }
 
 
 
 
-// Sets the members of `derivatives` to the current time-derivative of each
-// variable, `onfire` is set to its new state (since it is discrete and does not
-// have a derivative).
+// =========================================================================== //
+// = DERIVATIVES ============================================================= //
+// =========================================================================== //
+
 static void sim_diff(simState* s, simRunning* rstr rn,
         simRunning* rstr derivatives) {
     // Unpack current state variables.
@@ -217,186 +369,114 @@ static void sim_diff(simState* s, simRunning* rstr rn,
     f64 T_o   = rn->T_o;
     f64 m_o   = rn->m_o;
     f64 rr_f  = rn->rr_f;
-    f64 m_g   = rn->m_g;
-    f64 N_g   = rn->N_g;
-    f64 Cv_g  = rn->Cv_g;
-    f64 U_g   = rn->U_g;
     f64 alt_r = rn->alt_r;
     f64 vel_r = rn->vel_r;
 
     // Ambient pressure changes with altitude.
     f64 P_a = amb_P(alt_r);
 
-    // Reconstruct some cc/fuel state.
+    // Reconstruct some fuel state.
     Grain* grain = get_grain(s, rr_f);
     f64 Aneg_f = grain_Aneg(grain);
     f64 V_f = grain_V(grain, Aneg_f);
-    f64 V_c = s->Vempty_c - V_f;
     f64 m_f = s->rho_f * V_f;
-
-    // Reconstruct some cc gas state.
-    f64 cv_g = Cv_g / m_g;
-    f64 R_g  = GAS_CONSTANT * N_g / m_g;
-    f64 cp_g = cv_g + R_g;
-    f64 Y_g  = cp_g / cv_g;
-    f64 T_g  = U_g / Cv_g;
-    f64 P_c  = (onfire) ? (N_g * GAS_CONSTANT * T_g / V_c) : P_a;
-
 
 
     // If its still simming, somethings gone wrong.
-    assert(t < ((onfire) ? comb_max_t : max_t), "onfire=%f", onfire);
+    assert(t < ((onfire) ? comb_max_t : max_t), "onfire=%lld", onfire);
 
-    // If sim is unstable, generally manifests as cooked cc gas properties.
+    // If sim is unstable, generally manifests as cooked tank properties.
     assert(T_o > 0.0, "T_o=%f", T_o);
-    assert(m_g >= 0.0, "m_g=%f", m_g);
-    assert(T_g > 0.0, "T_g=%f", T_g);
-    assert(Y_g > 0.0, "Y_g=%f", Y_g);
-    assert(R_g > 0.0, "R_g=%f", R_g);
 
 
-    // To model mov opening, we apply some proportion value to the injector area,
-    // where it starts at 0 and ends at 1 at the opening time.
-    f64 A_injo_frac = 1.0;
-    if (t < s->Ot_mov) {
-        // https://www.desmos.com/calculator/3oetvtaoxb
-        f64 x = t / s->Ot_mov;
-        A_injo_frac = 1.0 - (x - 1.0)*(x - 1.0);
-    }
-    f64 A_injo = s->A_injo * A_injo_frac;
-
-
-
-    // Properties determined around injector:
-    f64 P_t, dm_inj, dT_o;
-
+    // Tank state, and the cached injector flow state for it.
+    f64 P_t = 0.0;
+    f64 rho_o = NAN;
+    f64 h_out = NAN;
+    InjFlow inj;
     // Still oxidiser left (note it asymptotes to 0kg so there should always be
     // oxidiser left but anyway).
-    if (m_o > 0.0) {
-        f64 rho_o = m_o / s->V_t;
+    i32 have_ox = (m_o > 0.0);
+    if (have_ox) {
+        rho_o = m_o / s->V_t;
         f64 X_o = N2O_X(T_o, rho_o);
         P_t = N2O_P(T_o, rho_o);
 
-        f64 P_d = max(P_c, N2O_Ptrip);
-
         // What leaves the tank: liquid while any remains, else vapour.
-        f64 h_out;
-        if (T_o < N2O_Tcrit && X_o < 1.0) {
-            f32 compressed = (X_o < 0.0);
+        inj.liquid_draining = (T_o < N2O_Tcrit && X_o < 1.0);
+        if (inj.liquid_draining) {
+            i32 compressed = (X_o < 0.0);
             f64 rho_u = (compressed) ? rho_o : N2O_satliq_rho(T_o);
             h_out = (compressed) ? N2O_h(T_o, rho_o) : N2O_satliq_h(T_o);
-            dm_inj = hole_N2O_dm(&(HoleN2O){
-                .model=s->model_inj,
-                .Cd=s->Cd_inj,
-                .A=A_injo,
-                .P_u=P_t,
-                .P_d=P_d,
-                .T_u=T_o,
-                .rho_u=rho_u,
+            inj.liq = hole_N2OU(&(HoleN2O){
+                .model = s->model_inj,
+                .CdA = s->CdA_inj,
+                .P_u = P_t,
+                .T_u = T_o,
+                .rho_u = rho_u,
             });
         } else {
             h_out = N2O_h(T_o, rho_o);
-            dm_inj = hole_dm(&(Hole){
-                .Cd=s->Cd_inj,
-                .A=A_injo,
-                .P_u=P_t,
-                .P_d=P_d,
-                .Y=N2O_Y(T_o, rho_o),
-                .R=N2O_R,
-                .T=T_o,
-                .Z=N2O_Z(T_o, rho_o),
+            inj.gas = holeU(&(Hole){
+                .CdA = s->CdA_inj,
+                .P_u = P_t,
+                .Y = N2O_Y(T_o, rho_o),
+                .R = N2O_R,
+                .T = T_o,
+                .Z = N2O_Z(T_o, rho_o),
             });
         }
+    }
 
-        // First law.
+
+    // Fuel mass flow per unit regression rate [kg/m] = rho_f * burning area.
+    // The grain functions are linear in the regression rate at fixed geometry,
+    // so evaluate the mass flow [kg/s] at a reference rate [m/s] and divide it
+    // back out: kg/s / (m/s) = kg/m. (drr_ref's value is arbitrary.)
+    f64 drr_f_ref = 1.0; // [m/s]
+    f64 dm_per_drr = s->rho_f
+                   * -grain_dV(grain, Aneg_f,
+                               grain_dAneg(grain, Aneg_f, drr_f_ref))
+                   / drr_f_ref;
+
+    // Chamber: quasi-steady mass balance while burning, else ambient.
+    CCctx cc_ctx = {
+        .s = s,
+        .inj = (have_ox) ? &inj : NULL,
+        .P_a = P_a,
+        .regressing = (onfire && m_f > 0.0), // Gotta be fire and fuel left.
+        .Aneg_f = Aneg_f,
+        .dm_per_drr = dm_per_drr,
+    };
+    CCstate cc;
+    if (onfire) {
+        cc = cc_solve(&cc_ctx, P_t, rn->P_c_hint);
+        rn->P_c_hint = cc.P_c; // hint future steps.
+    } else {
+        // Assume chamber at ambient.
+        cc = cc_eval(&cc_ctx, P_a);
+    }
+    f64 dm_inj = cc.dm_inj;
+
+
+
+    // Tank first law (closed form, valid in every phase).
+    f64 dT_o = 0.0;
+    if (have_ox) {
         f64 Cv = m_o * N2O_cv(T_o, rho_o) + s->C_tw;
         dT_o = dm_inj * (N2O_u(T_o, rho_o) - h_out
                        + rho_o * N2O_du_drho_T(T_o, rho_o)) / Cv;
-    } else {
-        P_t = 0.0;
-        dm_inj = 0.0;
-        dT_o = 0.0;
     }
-
     f64 dm_o = -dm_inj;
 
 
 
-    // Do fuel regression.
-    f64 drr_f;
-    f64 dm_reg;
-    // Gotta be fire and fuel left to regress.
-    if (onfire && (m_f > 0.0)) {
-
-        // Get oxidiser mass flux through the fuel grain.
-        f64 G_o = dm_inj / Aneg_f;
-        // Use empircally determined regression rate.
-        drr_f = grain_drr(G_o);
-
-        // Determine the amount of fuel regressing.
-        f64 dAneg_f = grain_dAneg(grain, Aneg_f, drr_f);
-        f64 dV_f = grain_dV(grain, Aneg_f, dAneg_f);
-        dm_reg = s->rho_f * (-dV_f);
-
-    } else {
-        // No fuel left.
-        drr_f = 0.0;
-        dm_reg = 0.0;
-    }
-
-
-
-    // Do nozzle flow.
-    f64 dm_out = hole_dm(&(Hole){
-        .Cd = 1.0,
-        .A = s->A_tht,
-        .P_u = P_c,
-        .P_d = P_a,
-        .Y = Y_g,
-        .R = R_g,
-        .T = T_g,
-        .Z = 1.0, // assume ideal gas.
-    });
-
-
-
     // Do combustion things.
-
     f64 Thrust;
-    f64 dm_g;
-    f64 dN_g;
-    f64 dCv_g;
-    f64 dU_g;
-
-    // Instantaneous oxidiser-fuel ratio.
-    f64 ofr = (dm_reg > 0.0) ? (dm_inj / dm_reg) : 0.0;
-
     if (onfire) {
-        // Tables assert out of domain; clamp to the propellant's domain here.
-        f64 P_cea = min(max(P_c, CEA_min_P), CEA_max_P);
-        f64 ofr_cea = min(max(ofr, CEA_min_ofr), CEA_max_ofr);
-
-        // Fresh products: adiabatic flame state, with C* efficiency applied as
-        // a temperature deficit (C* ~ sqrt(R*T) at fixed Y, Mw).
-        f64 dm_n = dm_inj + dm_reg;
-        f64 T_n  = cea_T(P_cea, ofr_cea, CEA_AR_stag);
-        T_n *= s->etaCstar*s->etaCstar; // apply C* efficiency.
-        f64 Mw_n = cea_Mw(P_cea, ofr_cea, CEA_AR_stag);
-        f64 Y_n  = cea_Y(P_cea, ofr_cea, CEA_AR_stag);
-        f64 R_n  = GAS_CONSTANT / Mw_n;
-        f64 cv_n = R_n / (Y_n - 1.0);
-        f64 h_n  = (cv_n + R_n) * T_n;
-
-        // Open fixed-volume reservoir; outflow leaves with the mixture's own
-        // intensive properties.
-        dm_g  = dm_n - dm_out;
-        dN_g  = dm_n / Mw_n - dm_out * N_g / m_g;
-        dCv_g = dm_n * cv_n - dm_out * cv_g;
-        dU_g  = dm_n * h_n - dm_out * cp_g * T_g;
-
         // Thrust from CEA, with back-pressure loss term and C* efficiency.
-        f64 Ivac = cea_Ivac(P_cea, ofr_cea, s->AEAT);
-        Thrust = dm_out * Ivac * STANDARD_GRAVITY;
+        f64 Ivac = cea_Ivac(cc.P_cea, cc.ofr_cea, s->AEAT);
+        Thrust = cc.dm_out * Ivac * STANDARD_GRAVITY;
         Thrust *= s->etaCstar * s->etaCf; // efficiency penalty.
         Thrust -= P_a*s->A_exit; // back-pressure force balance.
         // Pretend it doesnt suck the rocket downwards. This happens at extremely
@@ -407,18 +487,11 @@ static void sim_diff(simState* s, simRunning* rstr rn,
         // Assume that combustion stops when ofr becomes too extreme (but only
         // after startup).
         if (t > startup_max_t)
-            onfire = within(ofr, comb_min_ofr, comb_max_ofr);
-
+            onfire = within(cc.ofr, comb_min_ofr, comb_max_ofr);
     } else {
         // Assume no thrust without combustion (i.e. ignore any residual thrust
         // from still-pressurised tank/cc).
         Thrust = 0.0;
-
-        // Ignore cc gas properties if not combusting.
-        dm_g = 0.0;
-        dN_g = 0.0;
-        dCv_g = 0.0;
-        dU_g = 0.0;
     }
 
 
@@ -444,16 +517,16 @@ static void sim_diff(simState* s, simRunning* rstr rn,
                         // the reader.
     derivatives->T_o   = dT_o;
     derivatives->m_o   = dm_o;
-    derivatives->rr_f  = drr_f;
-    derivatives->m_g   = dm_g;
-    derivatives->N_g   = dN_g;
-    derivatives->Cv_g  = dCv_g;
-    derivatives->U_g   = dU_g;
+    derivatives->rr_f  = cc.drr_f;
     derivatives->alt_r = vel_r;
     derivatives->vel_r = dvel_r;
 }
 
 
+
+// =========================================================================== //
+// = SIMULATION ============================================================== //
+// =========================================================================== //
 
 enum {
     SIM_KEEP_GOING = 0,
@@ -488,10 +561,6 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
                 .T_o   = prev.T_o   + rk4_Dt * d->T_o,
                 .m_o   = prev.m_o   + rk4_Dt * d->m_o,
                 .rr_f  = prev.rr_f  + rk4_Dt * d->rr_f,
-                .m_g   = prev.m_g   + rk4_Dt * d->m_g,
-                .N_g   = prev.N_g   + rk4_Dt * d->N_g,
-                .Cv_g  = prev.Cv_g  + rk4_Dt * d->Cv_g,
-                .U_g   = prev.U_g   + rk4_Dt * d->U_g,
                 .alt_r = prev.alt_r + rk4_Dt * d->alt_r,
                 .vel_r = prev.vel_r + rk4_Dt * d->vel_r,
             };
@@ -513,10 +582,6 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     f64 dT_o   = (k1->T_o   + 2*k2->T_o   + 2*k3->T_o   + k4->T_o  ) / 6;
     f64 dm_o   = (k1->m_o   + 2*k2->m_o   + 2*k3->m_o   + k4->m_o  ) / 6;
     f64 drr_f  = (k1->rr_f  + 2*k2->rr_f  + 2*k3->rr_f  + k4->rr_f ) / 6;
-    f64 dm_g   = (k1->m_g   + 2*k2->m_g   + 2*k3->m_g   + k4->m_g  ) / 6;
-    f64 dN_g   = (k1->N_g   + 2*k2->N_g   + 2*k3->N_g   + k4->N_g  ) / 6;
-    f64 dCv_g  = (k1->Cv_g  + 2*k2->Cv_g  + 2*k3->Cv_g  + k4->Cv_g ) / 6;
-    f64 dU_g   = (k1->U_g   + 2*k2->U_g   + 2*k3->U_g   + k4->U_g  ) / 6;
     f64 dalt_r = (k1->alt_r + 2*k2->alt_r + 2*k3->alt_r + k4->alt_r) / 6;
     f64 dvel_r = (k1->vel_r + 2*k2->vel_r + 2*k3->vel_r + k4->vel_r) / 6;
 
@@ -526,10 +591,6 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     rn->T_o   = prev.T_o   + Dt * dT_o;
     rn->m_o   = prev.m_o   + Dt * dm_o;
     rn->rr_f  = prev.rr_f  + Dt * drr_f;
-    rn->m_g   = prev.m_g   + Dt * dm_g;
-    rn->N_g   = prev.N_g   + Dt * dN_g;
-    rn->Cv_g  = prev.Cv_g  + Dt * dCv_g;
-    rn->U_g   = prev.U_g   + Dt * dU_g ;
     rn->alt_r = prev.alt_r + Dt * dalt_r;
     rn->vel_r = prev.vel_r + Dt * dvel_r;
 
@@ -552,9 +613,6 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
         // it kept having a trailing zero in the ofr without it and like she'll
         // be right.
     }
-    // Don't let gas masses slip below 0.
-    if (rn->m_g < 0.0)
-        rn->m_g = 0.0;
 
 
     // TODO: tmp outputs
@@ -564,10 +622,6 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     if (s->out_T_o)    s->out_T_o[s->out_upto]    = rn->T_o;
     if (s->out_m_o)    s->out_m_o[s->out_upto]    = rn->m_o;
     if (s->out_rr_f)   s->out_rr_f[s->out_upto]   = rn->rr_f;
-    if (s->out_m_g)    s->out_m_g[s->out_upto]    = rn->m_g;
-    if (s->out_N_g)    s->out_N_g[s->out_upto]    = rn->N_g;
-    if (s->out_Cv_g)   s->out_Cv_g[s->out_upto]   = rn->Cv_g;
-    if (s->out_U_g)    s->out_U_g[s->out_upto]    = rn->U_g;
     if (s->out_alt_r)  s->out_alt_r[s->out_upto]  = rn->alt_r;
     if (s->out_vel_r)  s->out_vel_r[s->out_upto]  = rn->vel_r;
     ++s->out_upto;
@@ -579,18 +633,11 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
 
 
 void sim_execute(simState* rstr s) {
-    // Integrate the system differential.
+    // Integrate the system differential, tracking a running state.
     simRunning* rn = &(simRunning){0};
     sim_initial(s, rn);
     while (sim_ulate(s, rn) != SIM_STOP);
 }
-
-
-
-
-
-
-
 
 
 

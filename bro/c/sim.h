@@ -58,14 +58,13 @@ their count is >0.
     X(m0_o, f64, C_INPUT | C_OUTPUT)                                            \
     X(vff0_l, f64, C_INPUT | C_OUTPUT)                                          \
                                                                                 \
-    X(Ot_mov, f64, C_INPUT)                                                     \
-                                                                                \
     X(model_inj, i64, C_INPUT) /* must be an `HOLE_N2O_*` constant. */          \
     X(Cd_inj, f64, C_INPUT)                                                     \
     X(no_injo, f64, C_INPUT | C_OUTPUT)                                         \
     X(D_injo, f64, C_INPUT | C_OUTPUT)                                          \
     X(Deq_injo, f64, C_INPUT | C_OUTPUT)                                        \
     X(A_injo, f64, C_OUTPUT)                                                    \
+    X(CdA_inj, f64, C_OUTPUT)                                                   \
                                                                                 \
     X(etaCstar, f64, C_INPUT)                                                   \
     X(etaCf, f64, C_INPUT)                                                      \
@@ -92,10 +91,6 @@ their count is >0.
     X(out_T_o, f64*, C_INPUT | C_OUTPUT_DATA)                                   \
     X(out_m_o, f64*, C_INPUT | C_OUTPUT_DATA)                                   \
     X(out_rr_f, f64*, C_INPUT | C_OUTPUT_DATA)                                  \
-    X(out_m_g, f64*, C_INPUT | C_OUTPUT_DATA)                                   \
-    X(out_N_g, f64*, C_INPUT | C_OUTPUT_DATA)                                   \
-    X(out_Cv_g, f64*, C_INPUT | C_OUTPUT_DATA)                                  \
-    X(out_U_g, f64*, C_INPUT | C_OUTPUT_DATA)                                   \
     X(out_alt_r, f64*, C_INPUT | C_OUTPUT_DATA)                                 \
     X(out_vel_r, f64*, C_INPUT | C_OUTPUT_DATA)                                 \
 
