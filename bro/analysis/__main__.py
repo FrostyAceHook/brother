@@ -1,10 +1,21 @@
 """
-Runs './rocket.py' main.
+Runs the rocket analysis.
 """
 
-from .. import geez
-from .rocket import main
+import sys
+
+from .. import build
+from . import rocket
+from .. import paths
+
+def main():
+    try:
+        build.build(must=False)
+    except build.BuildError:
+        return 2
+    return rocket.run()
 
 if __name__ == "__main__":
-    with geez.instance():
-        main()
+    if len(sys.argv) > 1:
+        raise RuntimeError(f"{paths.pyname()} does not have command line args")
+    sys.exit(main())

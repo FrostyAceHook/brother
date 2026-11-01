@@ -226,14 +226,19 @@ f64 hole_N2OU_dm(const HoleN2OU* up, f64 P_d) {
         // Still single-phase (liquid) at the exit: SPC is the right answer.
         // (Possible only for compressed inlets, choking at the saturation
         // crossing.)
-        if (up->X_chokeHEM <= 0.0)
+        if (up->X_chokeHEM <= 0)
             return dm_SPC;
         dm_HEM = up->dm_chokeHEM;
         k_FML = up->k_chokeFML;
     } else {
-        HemExit_ e = hem_exit_(up->s_u, up->h_u, N2O_Tsat(P_e));
+        i32 single_phase = (P_e >= N2O_Psat_hi);
+        HemExit_ e;
+        if (!single_phase) {
+            e = hem_exit_(up->s_u, up->h_u, N2O_Tsat(P_e));
+            single_phase = (e.X <= 0);
+        }
         // Still single-phase (liquid) at the exit: SPC is the right answer.
-        if (e.X <= 0.0)
+        if (single_phase)
             return dm_SPC;
         assert(e.X <= 1.0, "HEM exit quality X_e=%g", e.X);
         dm_HEM = up->CdA * e.G;

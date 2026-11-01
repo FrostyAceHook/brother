@@ -88,6 +88,7 @@ m = Annotated[_Float, Unit("m")]
 mm = Annotated[_Float, Unit("mm", 1e-3)]
 um = Annotated[_Float, Unit("µm", 1e-6)]
 inch = Annotated[_Float, Unit("in", 25.4e-3)]
+kft = Annotated[_Float, Unit("kft", 1e3/3.281)]
 
 # Area.
 m2 = Annotated[_Float, Unit("m²")]
@@ -125,7 +126,10 @@ hour = Annotated[_Float, Unit("h", 3600.0)]
 N = Annotated[_Float, Unit("N")]
 kN = Annotated[_Float, Unit("kN", 1e3)]
 lbf = Annotated[_Float, Unit("lbf", 4.4482216152605)]
+
+# Impulse.
 Ns = Annotated[_Float, Unit("Ns")]
+kNs = Annotated[_Float, Unit("kNs", 1e3)]
 
 # Pressure.
 Pa = Annotated[_Float, Unit("Pa")]

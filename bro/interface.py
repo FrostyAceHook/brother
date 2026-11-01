@@ -449,6 +449,7 @@ class Interface:
         string = str(value)
         self.state[name] = value
         self.boxes[name] = string
+        # TODO: direct inputs of nan kinda break `boxes` contract a liiiiittle.
     def input_parsed(self, name, string):
         if string is None:
             self.state[name] = nan
