@@ -424,7 +424,7 @@ class Interface:
         for p in params_grouped()["__snapshot_interp__"]:
             snapshot_interp.append(p.c_name, p.c_type, p.c_flags)
         snapshot_interp.finalise()
-        self.state["snap_upto"] = 0
+        # `snap_upto` set before each run.
         self.state["snap_count"] = self.SNAPSHOT_COUNT
         self.state["snap_hash"] = snapshot_interp.get_hash()
         self.state["snap_array"] = np.empty(
@@ -461,6 +461,7 @@ class Interface:
             self.input_parsed(name, string)
 
     def sim(self):
+        self.state["snap_upto"] = 0
         ret = self.state.execute()
         if ret is not None:
             raise RuntimeError(ret)
