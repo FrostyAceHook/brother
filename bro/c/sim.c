@@ -231,7 +231,7 @@ static CCstate cc_solve(const CCctx* c, f64 P_t, f64 P_hint) {
 
 static void sim_initial(simState* s, simRunning* rn) {
 
-    assert(oneof(s->static_fire, 0, 1), "static_fire=%lld", s->static_fire);
+    assert(oneof(s->static_fire, 0, 1), "static_fire=%g", s->static_fire);
 
 
     assert(notnan(s->alt0_r), "alt0_r=%g", s->alt0_r);
@@ -259,8 +259,6 @@ static void sim_initial(simState* s, simRunning* rn) {
     assert(s->m0_o >= 0, "m0_o=%g", s->m0_o);
 
 
-    assert(oneof(s->model_inj, HOLE_N2O_SPC, HOLE_N2O_HEM, HOLE_N2O_DYER,
-            HOLE_N2O_FML), "model_inj=%lld", s->model_inj);
     assert(0 < s->Cd_inj && s->Cd_inj <= 1, "Cd_inj=%g", s->Cd_inj);
     assert(notnan(s->no_injo) + notnan(s->D_injo) + notnan(s->Deq_injo) == 2,
             "need exactly two of no_injo=%g, D_injo=%g, Deq_injo=%g", s->no_injo,
@@ -302,13 +300,34 @@ static void sim_initial(simState* s, simRunning* rn) {
     assert(s->m0_f > 0, "m0_f=%g", s->m0_f);
 
 
-    assert(within(s->AEAT, NZL_min_AEAT, NZL_max_AEAT), "AEAT=%g", s->AEAT);
-    assert(within(s->NLF, NZL_min_NLF, NZL_max_NLF), "NLF=%g", s->NLF);
-    assert(within(s->AEAT, CEA_min_AR, CEA_max_AR), "AEAT=%g", s->AEAT);
+    assert(notnan(s->D_tht) + notnan(s->A_tht) == 1,
+            "need exactly one of D_tht=%g, A_tht=%g", s->D_tht, s->A_tht);
+    if (isnan(s->A_tht))
+        s->A_tht = circ_area(s->D_tht);
+    else
+        s->D_tht = circ_diam(s->A_tht);
     assert(s->D_tht > 0, "D_tht=%g", s->D_tht);
-    s->A_tht = circ_area(s->D_tht);
-    s->A_exit = s->A_tht * s->AEAT;
-    s->D_exit = s->D_tht * sqrt(s->AEAT);
+    assert(s->A_tht > 0, "A_tht=%g", s->A_tht);
+    assert(notnan(s->D_exit) + notnan(s->A_exit) + notnan(s->AEAT) == 1,
+            "need exactly one of D_exit=%g, A_exit=%g, AEAT=%g", s->D_exit,
+            s->A_exit, s->AEAT);
+    if (notnan(s->D_exit)) {
+        s->A_exit = circ_area(s->D_exit);
+        s->AEAT = s->A_exit / s->A_tht;
+    } else if (notnan(s->A_exit)) {
+        s->D_exit = circ_diam(s->A_exit);
+        s->AEAT = s->A_exit / s->A_tht;
+    } else {
+        s->A_exit = s->AEAT * s->A_tht;
+        s->D_exit = circ_diam(s->A_exit);
+    }
+    assert(s->D_exit > 0, "D_exit=%g", s->D_exit);
+    assert(s->A_exit > 0, "A_exit=%g", s->A_exit);
+    assert(s->AEAT > 1, "AEAT=%g", s->AEAT);
+    assert(0 < s->NLF && s->NLF <= 1, "NLF=%g", s->NLF);
+    assert(within(s->AEAT, NZL_min_AEAT, NZL_max_AEAT), "AEAT=%g", s->AEAT);
+    assert(within(s->AEAT, CEA_min_AR, CEA_max_AR), "AEAT=%g", s->AEAT);
+    assert(within(s->NLF, NZL_min_NLF, NZL_max_NLF), "NLF=%g", s->NLF);
     s->theta_div = nzl_theta_div(s->AEAT, s->NLF);
     s->theta_exit = nzl_theta_exit(s->AEAT, s->NLF);
     assert(0 < s->theta_div && s->theta_div < PI_2,
@@ -407,7 +426,7 @@ static void sim_diff(simState* s, simRunning* rstr rn,
             f64 rho_u = (compressed) ? rho_o : N2O_satliq_rho(T_o);
             h_out = (compressed) ? N2O_h(T_o, rho_o) : N2O_satliq_h(T_o);
             inj.liq = hole_N2OU(&(HoleN2O){
-                .model = s->model_inj,
+                .model = HOLE_N2O_FML, // TODO: dont hardcode.
                 .CdA = s->CdA_inj,
                 .P_u = P_t,
                 .T_u = T_o,

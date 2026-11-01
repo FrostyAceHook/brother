@@ -4,6 +4,10 @@
 #include "maths.h"
 
 
+f64 circ_diam(f64 A) {
+    assert(A >= 0.0, "A=%f", A);
+    return sqrt(A / PI_4);
+}
 f64 circ_area(f64 D) {
     assert(D >= 0.0, "D=%f", D);
     return PI_4 * D*D;

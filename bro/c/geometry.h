@@ -4,6 +4,7 @@
 
 // Geomtric formulas.
 
+f64 circ_diam(f64 A);
 f64 circ_area(f64 D);
 f64 circ_perim(f64 D);
 f64 cyl_vol(f64 L, f64 D);

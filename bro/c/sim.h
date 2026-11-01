@@ -43,7 +43,7 @@ their count is >0.
 
 // Canonical interpretation of the state array.
 #define SIM_INTERPRETATION                                                      \
-    X(static_fire, i64, C_INPUT)                                                \
+    X(static_fire, f64, C_INPUT)                                                \
                                                                                 \
     X(alt0_r, f64, C_INPUT)                                                     \
     X(D_r, f64, C_INPUT)                                                        \
@@ -58,7 +58,6 @@ their count is >0.
     X(m0_o, f64, C_INPUT | C_OUTPUT)                                            \
     X(vff0_l, f64, C_INPUT | C_OUTPUT)                                          \
                                                                                 \
-    X(model_inj, i64, C_INPUT) /* must be an `HOLE_N2O_*` constant. */          \
     X(Cd_inj, f64, C_INPUT)                                                     \
     X(no_injo, f64, C_INPUT | C_OUTPUT)                                         \
     X(D_injo, f64, C_INPUT | C_OUTPUT)                                          \
@@ -71,17 +70,17 @@ their count is >0.
     X(Vempty_c, f64, C_INPUT)                                                   \
                                                                                 \
     X(L0_f, f64, C_INPUT)                                                       \
-    X(th0_f, f64, C_INPUT)                                                      \
     X(OD0_f, f64, C_INPUT)                                                      \
+    X(th0_f, f64, C_INPUT)                                                      \
     X(rho_f, f64, C_INPUT | C_OUTPUT)                                           \
     X(m0_f, f64, C_INPUT | C_OUTPUT)                                            \
                                                                                 \
-    X(AEAT, f64, C_INPUT)                                                       \
+    X(D_tht, f64, C_INPUT | C_OUTPUT)                                           \
+    X(A_tht, f64, C_INPUT | C_OUTPUT)                                           \
+    X(D_exit, f64, C_INPUT | C_OUTPUT)                                          \
+    X(A_exit, f64, C_INPUT | C_OUTPUT)                                          \
+    X(AEAT, f64, C_INPUT | C_OUTPUT)                                            \
     X(NLF, f64, C_INPUT)                                                        \
-    X(D_tht, f64, C_INPUT)                                                      \
-    X(A_tht, f64, C_OUTPUT)                                                     \
-    X(D_exit, f64, C_OUTPUT)                                                    \
-    X(A_exit, f64, C_OUTPUT)                                                    \
     X(theta_div, f64, C_OUTPUT)                                                 \
     X(theta_exit, f64, C_OUTPUT)                                                \
                                                                                 \
