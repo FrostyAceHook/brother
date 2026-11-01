@@ -119,9 +119,9 @@ typedef struct CCstate {
     f64 ofr;
     f64 P_cea;   // P_c clamped into the CEA domain
     f64 ofr_cea; // ofr clamped into the CEA domain
-    f64 T_g;
-    f64 R_g;
-    f64 Y_g;
+    f64 T_c;
+    f64 R_c;
+    f64 Y_c;
     f64 dm_out;
     f64 resid; // dm_out - dm_inj - dm_reg
 } CCstate;
@@ -148,18 +148,18 @@ static CCstate cc_eval(const CCctx* c, f64 P_c) {
     // domain, with C* efficiency as a temperature deficit (C* ~ sqrt(R*T)).
     e.P_cea = min(max(P_c, CEA_min_P), CEA_max_P);
     e.ofr_cea = min(max(e.ofr, CEA_min_ofr), CEA_max_ofr);
-    e.T_g = cea_T(e.P_cea, e.ofr_cea, CEA_AR_stag)
+    e.T_c = cea_T(e.P_cea, e.ofr_cea, CEA_AR_stag)
           * s->etaCstar * s->etaCstar;
-    e.R_g = GAS_CONSTANT / cea_Mw(e.P_cea, e.ofr_cea, CEA_AR_stag);
-    e.Y_g = cea_Y(e.P_cea, e.ofr_cea, CEA_AR_stag);
+    e.R_c = GAS_CONSTANT / cea_Mw(e.P_cea, e.ofr_cea, CEA_AR_stag);
+    e.Y_c = cea_Y(e.P_cea, e.ofr_cea, CEA_AR_stag);
 
     e.dm_out = hole_dm(&(Hole){
         .CdA = s->A_tht,
         .P_u = P_c,
         .P_d = c->P_a,
-        .Y = e.Y_g,
-        .R = e.R_g,
-        .T = e.T_g,
+        .Y = e.Y_c,
+        .R = e.R_c,
+        .T = e.T_c,
         .Z = 1.0,
     });
     e.resid = e.dm_out - e.dm_inj - e.dm_reg;
@@ -336,18 +336,10 @@ static void sim_initial(simState* s, simRunning* rn) {
             "theta_exit=%g", s->theta_exit);
 
 
-    assert(s->out_count >= 0, "out_count=%lld", s->out_count);
-    if (s->out_count == 0) {
-        // No storage: all buffers are treated as null.
-        s->out_upto = intmin(i64);
-        s->out_t = NULL;
-        s->out_T_o = NULL;
-        s->out_m_o = NULL;
-        s->out_rr_f = NULL;
-        s->out_alt_r = NULL;
-        s->out_vel_r = NULL;
-    } else {
-        assert(0 <= s->out_upto, "out_upto=%lld", s->out_upto);
+    assert(s->snap_count >= 0, "snap_count=%lld", s->snap_count);
+    if (s->snap_count) {
+        assert(0 <= s->snap_upto, "snap_upto=%lld", s->snap_upto);
+        assert(s->snap_array, "null pointer");
     }
 
 
@@ -378,8 +370,8 @@ static void sim_initial(simState* s, simRunning* rn) {
 // = DERIVATIVES ============================================================= //
 // =========================================================================== //
 
-static void sim_diff(simState* s, simRunning* rstr rn,
-        simRunning* rstr derivatives) {
+static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
+        simSnapshot* ss /* may be null */) {
     // Unpack current state variables.
     i64 onfire = rn->onfire;
     f64 t     = rn->t;
@@ -409,6 +401,7 @@ static void sim_diff(simState* s, simRunning* rstr rn,
     // Tank state, and the cached injector flow state for it.
     f64 P_t = 0.0;
     f64 rho_o = NAN;
+    f64 X_o = NAN;
     f64 h_out = NAN;
     InjFlow inj;
     // Still oxidiser left (note it asymptotes to 0kg so there should always be
@@ -416,7 +409,7 @@ static void sim_diff(simState* s, simRunning* rstr rn,
     i32 have_ox = (m_o > 0.0);
     if (have_ox) {
         rho_o = m_o / s->V_t;
-        f64 X_o = N2O_X(T_o, rho_o);
+        X_o = N2O_X(T_o, rho_o);
         P_t = N2O_P(T_o, rho_o);
 
         // What leaves the tank: liquid while any remains, else vapour.
@@ -527,14 +520,138 @@ static void sim_diff(simState* s, simRunning* rstr rn,
 
     // Got all state time-dependant derivatives, lets pack it into the return
     // struct.
-    derivatives->onfire = onfire;
-    derivatives->t = 1; // extremely complex derivation, left as an exercise for
+    d_dt->onfire = onfire;
+    d_dt->t = 1; // extremely complex derivation, left as an exercise for
                         // the reader.
-    derivatives->T_o   = dT_o;
-    derivatives->m_o   = dm_o;
-    derivatives->rr_f  = cc.drr_f;
-    derivatives->alt_r = vel_r;
-    derivatives->vel_r = dvel_r;
+    d_dt->T_o   = dT_o;
+    d_dt->m_o   = dm_o;
+    d_dt->rr_f  = cc.drr_f;
+    d_dt->alt_r = vel_r;
+    d_dt->vel_r = dvel_r;
+
+
+    // Fill out full snapshot if requested.
+    if (!ss)
+        return;
+
+    // Tank phase split. Liquid and vapour don't exist supercritically (X is
+    // NaN there), so those fields are NaN.
+    f64 rho_l = NAN;
+    f64 rho_v = NAN;
+    f64 m_l = NAN;
+    f64 vff_l = NAN;
+    if (!have_ox) {
+        m_l = 0.0;
+        vff_l = 0.0;
+    } else if (notnan(X_o)) {
+        if (X_o <= 0.0) { // liquid.
+            rho_l = rho_o;
+            m_l = m_o;
+            vff_l = 1.0;
+        } else if (X_o >= 1.0) { // vapour.
+            rho_v = rho_o;
+            m_l = 0.0;
+            vff_l = 0.0;
+        } else { // saturated mixture.
+            rho_l = N2O_satliq_rho(T_o);
+            rho_v = N2O_satvap_rho(T_o);
+            m_l = (1.0 - X_o) * m_o;
+            vff_l = m_l / rho_l / s->V_t;
+        }
+    }
+
+    // Chamber gas: only meaningful while burning (rn->onfire is the state this
+    // evaluation ran in; `onfire` above may have just been switched off). It's
+    // the model's ideal gas (frozen Y, R, with C* efficiency in T), so the
+    // throat follows from isentropic relations at choke.
+    i32 burning = rn->onfire;
+    f64 Y = cc.Y_c;
+    f64 R = cc.R_c;
+    f64 T_cc = (burning) ? cc.T_c : NAN;
+    f64 P_cc = (burning) ? cc.P_c : NAN;
+    f64 rho_cc = P_cc/R/T_cc; // TODO: add to relations
+    f64 a_cc = sqrt(Y*R*T_cc); // TODO: ^
+    f64 cv_g = R / (Y - 1.0);
+    SpecificHeatRatio* shr = get_shr(Y);
+
+    // Throat plane.
+    f64 T_tht = NAN;
+    f64 P_tht = NAN;
+    f64 rho_tht = NAN;
+    f64 a_tht = NAN;
+    if (burning) {
+        T_tht   = T_cc   * isentropic_T_on_T0(1.0, shr);
+        P_tht   = P_cc   * isentropic_P_on_P0(1.0, shr);
+        rho_tht = rho_cc * isentropic_rho_on_rho0(1.0, shr);
+        a_tht   = sqrt(Y*R*T_tht);
+    }
+
+    // Exit plane.
+    f64 T_exit = NAN;
+    f64 P_exit = NAN;
+    f64 rho_exit = NAN;
+    f64 a_exit = NAN;
+    f64 M_exit = NAN;
+    if (burning) {
+        // Use isentropic relations smile.
+        f64 M = isentropic_sup_M(s->AEAT, shr);
+        T_exit   = T_cc   * isentropic_T_on_T0(M, shr);
+        P_exit   = P_cc   * isentropic_P_on_P0(M, shr);
+        rho_exit = rho_cc * isentropic_rho_on_rho0(M, shr);
+        a_exit   = sqrt(Y*R*T_exit);
+        M_exit   = M;
+    }
+
+
+    ss->t = rn->t;
+    ss->alt_r = rn->alt_r;
+    ss->vel_r = rn->vel_r;
+    ss->acc_r = (s->static_fire) ? 0 : dvel_r;
+    ss->mwet_r = mwet_r;
+    ss->P_t = P_t;
+    ss->P_c = cc.P_c;
+    ss->T_o = T_o;
+    ss->m_o = m_o;
+    ss->m_l = m_l;
+    ss->m_v = m_o - m_l;
+    ss->rho_l = rho_l;
+    ss->rho_v = rho_v;
+    ss->vff_l = vff_l;
+    ss->X_o = X_o;
+    ss->s_o = (have_ox) ? N2O_s(T_o, rho_o) : NAN;
+    ss->h_o = (have_ox) ? N2O_h(T_o, rho_o) : NAN;
+    ss->u_o = (have_ox) ? N2O_u(T_o, rho_o) : NAN;
+    ss->cp_o = (have_ox) ? N2O_cp(T_o, rho_o) : NAN; // NaN in the dome.
+    ss->cv_o = (have_ox) ? N2O_cv(T_o, rho_o) : NAN; // mixture cv in the dome.
+    ss->Y_o = (have_ox) ? N2O_Y(T_o, rho_o) : NAN; // NaN in the dome.
+    ss->m_f = m_f;
+    ss->rr_f = rr_f;
+    ss->Pr_inj = (cc.P_c > 0.0) ? P_t / cc.P_c : NAN; // tank/chamber.
+    ss->dm_inj = cc.dm_inj;
+    ss->dm_reg = cc.dm_reg;
+    ss->dm_out = cc.dm_out;
+    ss->T_cc = T_cc;
+    ss->rho_cc = rho_cc;
+    ss->a_cc = a_cc;
+    ss->Y_cc = (burning) ? Y : NAN;
+    ss->cp_cc = (burning) ? cv_g + R : NAN;
+    ss->cv_cc = (burning) ? cv_g : NAN;
+    ss->Mw_cc = (burning) ? GAS_CONSTANT / R : NAN;
+    ss->R_cc = (burning) ? R : NAN;
+    ss->T_tht = T_tht;
+    ss->P_tht = P_tht;
+    ss->rho_tht = rho_tht;
+    ss->a_tht = a_tht;
+    ss->T_exit = T_exit;
+    ss->P_exit = P_exit;
+    ss->rho_exit = rho_exit;
+    ss->a_exit = a_exit;
+    ss->M_exit = M_exit;
+    ss->ofr = (burning) ? cc.ofr : NAN;
+    ss->Isp = (cc.dm_out > 0.0) ? Thrust/cc.dm_out/STANDARD_GRAVITY : NAN;
+    ss->Thrust = Thrust;
+    ss->Drag = Drag;
+    ss->Gravity = Gravity;
 }
 
 
@@ -559,6 +676,10 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     if (stop)
         return SIM_STOP;
 
+    // Fill out snapshot if needed.
+    simSnapshot snap;
+    i32 recording = (s->snap_count > 0);
+
     // Do the four state derivatives that are needed for runge-kutta 4
     // integration.
     simRunning derivatives[4]; // all members are derivatives.
@@ -579,7 +700,7 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
                 .P_c_hint = rn->P_c_hint, // keep latest solve as hint.
             };
         }
-        sim_diff(s, rn, derivatives + i);
+        sim_diff(s, rn, derivatives + i, (i == 0 && recording) ? &snap : NULL);
 
         // Never moves under static fire.
         if (s->static_fire)
@@ -629,16 +750,13 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     }
 
 
-    // TODO: tmp outputs
-    assert(s->out_upto < s->out_count, "out_upto=%d, out_count=%d",
-            s->out_upto, s->out_count);
-    if (s->out_t)      s->out_t[s->out_upto]      = rn->t;
-    if (s->out_T_o)    s->out_T_o[s->out_upto]    = rn->T_o;
-    if (s->out_m_o)    s->out_m_o[s->out_upto]    = rn->m_o;
-    if (s->out_rr_f)   s->out_rr_f[s->out_upto]   = rn->rr_f;
-    if (s->out_alt_r)  s->out_alt_r[s->out_upto]  = rn->alt_r;
-    if (s->out_vel_r)  s->out_vel_r[s->out_upto]  = rn->vel_r;
-    ++s->out_upto;
+    // Output snapshot if requested.
+    if (s->snap_count > 0) {
+        assert(s->snap_upto < s->snap_count, "snap_upto=%d, snap_count=%d",
+                s->snap_upto, s->snap_count);
+        memcpy(s->snap_array + s->snap_upto*SIM_SNAPSHOT_N, &snap, sizeof(snap));
+        ++s->snap_upto;
+    }
 
 
     // Not finished.
@@ -647,6 +765,9 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
 
 
 void sim_execute(simState* rstr s) {
+    assert(s->snap_hash == sim_snapshot_hash(),
+            "snapshot hash does not match, proposal is dismissed");
+
     // Integrate the system differential, tracking a running state.
     simRunning* rn = &(simRunning){0};
     sim_initial(s, rn);
@@ -657,8 +778,17 @@ void sim_execute(simState* rstr s) {
 
 
 // =========================================================================== //
-// = INTERPRETATION HASH ===================================================== //
+// = HASHES ================================================================== //
 // =========================================================================== //
+
+c_IH sim_snapshot_hash(void) {
+    c_IH h = c_ih_initial();
+    #define X(name) \
+        h = c_ih_append(h, #name, C_F64 | C_OUTPUT);
+    SIM_SNAPSHOT
+    #undef X
+    return h;
+}
 
 c_IH sim_interpretation_hash(void) {
     c_IH h = c_ih_initial();

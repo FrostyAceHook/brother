@@ -111,6 +111,10 @@ cdef class Interpretation:
         """
         self._finalised = 1
 
+    def get_hash(Interpretation self):
+        """ Returns the current (running) interpretation hash. """
+        return self._hash
+
 
     # PRIVATE
 
@@ -126,7 +130,7 @@ cdef class Buffer:
     cdef void* ptr
     cdef object dt
 
-    def view(self, numel):
+    def sized(self, numel):
         if type(numel) is not int:
             raise ValueError("expected integer numel, got "
                             f"{repr(type(numel).__name__)}")

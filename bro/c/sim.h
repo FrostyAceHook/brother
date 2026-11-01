@@ -31,15 +31,76 @@ outputs are dependant. Note that this choice of "basis" variables (the
 independant parameters) is arbitrary, but some make significantly more sense than
 others (i.e. the relationship is difficult to inverse).
 
-Optional output buffers (`out_*`): must be supplied by the user, and each must
-be either null or contain at-least `out_count` elements. If `out_count` is <=0,
-all buffers are assumed to be null. `out_upto` contains the index of the next
-write into the buffers, aka the number of elements already written provided it
-was set to 0 before simming.
-
-Contour/curve buffers (`*_contour*`, `drag_curve_*`): always exactly filled if
-their count is >0.
+Optional output buffers (`snap_*`): must be supplied by the user, and all must
+contain at-least `snap_count` elements. If `snap_count` is <=0, all buffers are
+assumed to be null and will not be filled. `snap_upto` contains the index of the
+next write into the buffers, aka the number of elements already written provided
+it was set to 0 before simming.
 */
+
+
+#define SIM_SNAPSHOT    \
+    X(t)                \
+    X(alt_r)            \
+    X(vel_r)            \
+    X(acc_r)            \
+    X(mwet_r)           \
+    X(P_t)              \
+    X(P_c)              \
+    X(T_o)              \
+    X(m_o)              \
+    X(m_l)              \
+    X(m_v)              \
+    X(rho_l)            \
+    X(rho_v)            \
+    X(vff_l)            \
+    X(X_o)              \
+    X(s_o)              \
+    X(h_o)              \
+    X(u_o)              \
+    X(cp_o)             \
+    X(cv_o)             \
+    X(Y_o)              \
+    X(m_f)              \
+    X(rr_f)             \
+    X(Pr_inj)           \
+    X(dm_inj)           \
+    X(dm_reg)           \
+    X(dm_out)           \
+    X(T_cc)             \
+    X(rho_cc)           \
+    X(a_cc)             \
+    X(Y_cc)             \
+    X(cp_cc)            \
+    X(cv_cc)            \
+    X(Mw_cc)            \
+    X(R_cc)             \
+    X(T_tht)            \
+    X(P_tht)            \
+    X(rho_tht)          \
+    X(a_tht)            \
+    X(T_exit)           \
+    X(P_exit)           \
+    X(rho_exit)         \
+    X(a_exit)           \
+    X(M_exit)           \
+    X(ofr)              \
+    X(Isp)              \
+    X(Thrust)           \
+    X(Drag)             \
+    X(Gravity)          \
+
+
+typedef struct simSnapshot {
+    #define X(name) f64 name;
+    SIM_SNAPSHOT
+    #undef X
+} simSnapshot;
+
+enum { SIM_SNAPSHOT_N = sizeof(simSnapshot) / sizeof(f64) };
+static_assert(sizeof(simSnapshot) == SIM_SNAPSHOT_N*sizeof(f64));
+
+
 
 // Canonical interpretation of the state array.
 #define SIM_INTERPRETATION                                                      \
@@ -84,14 +145,11 @@ their count is >0.
     X(theta_div, f64, C_OUTPUT)                                                 \
     X(theta_exit, f64, C_OUTPUT)                                                \
                                                                                 \
-    X(out_upto, i64, C_INPUT | C_OUTPUT)                                        \
-    X(out_count, i64, C_INPUT)                                                  \
-    X(out_t, f64*, C_INPUT | C_OUTPUT_DATA)                                     \
-    X(out_T_o, f64*, C_INPUT | C_OUTPUT_DATA)                                   \
-    X(out_m_o, f64*, C_INPUT | C_OUTPUT_DATA)                                   \
-    X(out_rr_f, f64*, C_INPUT | C_OUTPUT_DATA)                                  \
-    X(out_alt_r, f64*, C_INPUT | C_OUTPUT_DATA)                                 \
-    X(out_vel_r, f64*, C_INPUT | C_OUTPUT_DATA)                                 \
+    X(snap_upto, i64, C_INPUT | C_OUTPUT)                                       \
+    X(snap_count, i64, C_INPUT)                                                 \
+    X(snap_hash, i64, C_INPUT)                                                  \
+    X(snap_array, f64 MAYALIAS*, C_INPUT | C_OUTPUT_DATA)                       \
+
 
 
 // Da state array (RIP bro sis).
@@ -103,6 +161,8 @@ typedef struct simState {
 
 // Returns the hash of the canonical interpretation of the state array.
 c_IH sim_interpretation_hash(void);
+// Returns the hash of the canonical interpretation of the snapshot.
+c_IH sim_snapshot_hash(void);
 
 // Simulation entrypoint. Errors are handled via asserts, caller is required to
 // setup assertion failed handling.
