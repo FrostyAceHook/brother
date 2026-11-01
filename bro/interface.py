@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from math import pi, nan, inf
 
 import numpy as np
+import matplotlib
 
 from . import bridge
 from . import geez
@@ -466,7 +467,7 @@ class Interface:
         if ret is not None:
             raise RuntimeError(ret)
 
-        window = geez.new_window()
+    def view(self, what="important"):
 
         # Extract from bridge as a flat numpy float array, then re-view numpy
         # array in correct dtype.
@@ -475,20 +476,266 @@ class Interface:
         array = self.state["snap_array"] \
                 .sized(self.state["snap_upto"] * len(snap_interp)) \
                 .view(dtype)
-        def get(name):
+        def number(name):
+            return self.state[name]
+        def trace(name):
             caster = params_snap_interp()[name].caster
             return (array[name] - caster.offset) / caster.scale
 
-        # Plot each thing against time.
-        t = get("t")
-        for i in range(1, len(snap_interp)):
-            j = ((i - 1) % 6)
-            if j == 0:
-                _, axes = window.new_plots(rows=2, cols=3)
-            param = snap_interp[i]
-            data = get(param.c_name)
-            label = f"{param.display_name} [{param.caster.display}]"
-            axes[j // 3, j % 3].plot(t, data)
-            axes[j // 3, j % 3].set_title(label)
-            if (j // 3) == 1:
-                axes[j // 3, j % 3].set_xlabel("Time [s]")
+        t = trace("t")
+
+        if what == "all":
+            # Plot each thing against time.
+            window = geez.new_window()
+            for i in range(1, len(snap_interp)):
+                j = ((i - 1) % 6)
+                if j == 0:
+                    _, axes = window.new_plots(rows=2, cols=3)
+                param = snap_interp[i]
+                data = trace(param.c_name)
+                label = f"{param.display_name} [{param.caster.display}]"
+                axes[j // 3, j % 3].plot(t, data)
+                axes[j // 3, j % 3].set_title(label)
+                if (j // 3) == 1:
+                    axes[j // 3, j % 3].set_xlabel("Time [s]")
+
+        elif what != "important":
+            assert False, f"unknown 'what': {what}"
+
+
+        # headline numbers:
+        #   apogee
+        #   impulse
+        #   burn time (liq/total)
+        #   prop masses (ox/fuel)
+        #   otr velocity
+        # headline traces:
+        #   thrust
+        #   isp
+        #   P_t & P_c
+        #   Pr_inj
+        #   mfr (ox/fuel)
+        #   ofr
+        ROD_HEIGHT = 5 # [m]
+
+        PALETTE = {
+            "red":    "C3",
+            "blue":   "C0",
+            "amber":  "C1",
+            "teal":   "C2",
+            "purple": "C4",
+            "pink":   "C6",
+            "maroon": "#8a0000",
+        }
+
+        Nliq = np.argmax(array["m_l"] == 0)
+        Nburn = np.argmax(array["Thrust"] != array["Thrust"])
+        assert Nliq > 0
+        assert Nburn > 0
+        Tburn = t[Nburn]
+
+        def otr_velocity():
+            diff = array["alt_r"] - number("alt0_r") - ROD_HEIGHT
+            sign_changes = np.where(np.diff(np.signbit(diff)))[0]
+            if sign_changes.size == 0:
+                return nan
+            idx = sign_changes[0]
+
+            t0, t1 = t[idx], t[idx+1]
+            alt0, alt1 = diff[idx], diff[idx+1]
+            t_cross = t0 - alt0 * (t1 - t0) / (alt1 - alt0)
+
+            return np.interp(t_cross, t, array["vel_r"])
+
+        numbers = {
+            "apogee": trace("alt_r")[-1],
+            "impulse": (np.trapezoid(array["Thrust"][:Nburn], x=t[:Nburn]),
+                        np.trapezoid(array["Thrust"][:Nliq], x=t[:Nliq])),
+            "burn_time": (t[Nburn], t[Nliq]),
+            "prop_masses": (number("m0_o"), number("m0_f")),
+            "otr_velocity": otr_velocity(),
+        }
+        traces = {
+            "thrust": 1e-3*trace("Thrust"),
+            "isp": trace("Isp"),
+            "pressures": (trace("P_t"), trace("P_c")),
+            "stiffness": 100*(trace("Pr_inj") - 1),
+            "mfr": (trace("dm_inj"), trace("dm_reg")),
+            "ofr": trace("ofr"),
+        }
+
+
+        def tile_numbers(ax):
+            from matplotlib.patches import FancyBboxPatch
+            from matplotlib.colors import to_rgba
+            ax.axis("off")
+            stats = [  # (label, colour, value)
+                ("apogee", PALETTE["amber"],
+                    f'{numbers["apogee"]:.2f} kft'
+                ),
+                ("impulse (liq.)", PALETTE["pink"],
+                    f'{numbers["impulse"][0]*1e-3:.1f} '
+                    f'({numbers["impulse"][1]*1e-3:.1f}) kNs'
+                ),
+                ("burn time (liq.)", PALETTE["teal"],
+                    f'{numbers["burn_time"][0]:.2f} '
+                    f'({numbers["burn_time"][1]:.2f}) s'
+                ),
+                ("prop. masses (ox/fuel)", PALETTE["purple"],
+                    f'{numbers["prop_masses"][0]:.2f} / '
+                    f'{numbers["prop_masses"][1]:.2f} kg'
+                ),
+                ("otr. velocity", PALETTE["blue"],
+                    f'{numbers["otr_velocity"]:.1f} m/s'
+                ),
+            ]
+            # patch coords are axes fractions, and this axes is ~12x wider than tall,
+            # so isotropic (round-in-pixels) corners need mutation_aspect = w/h
+            pos = ax.get_position()
+            figw, figh = ax.figure.get_size_inches()
+            aspect = (pos.width * figw) / (pos.height * figh)
+            n = len(stats)
+            w = 0.85 / n
+            for i, (label, col, value) in enumerate(stats):
+                x = (i + 0.5) / n
+                ax.add_patch(FancyBboxPatch(
+                    (x - w / 2, 0.06), w, 0.88, transform=ax.transAxes,
+                    boxstyle="round,pad=0.006,rounding_size=0.018",
+                    mutation_aspect=aspect,
+                    facecolor=to_rgba(col, 0.08), edgecolor=to_rgba(col, 0.55),
+                    lw=1.3, clip_on=False))
+                ax.text(x, 0.72, label, ha="center", va="center", fontsize=11,
+                        color="0.45", fontweight="bold", transform=ax.transAxes)
+                ax.text(x, 0.28, value, ha="center", va="center", fontsize=15,
+                        color=col, fontweight="bold", transform=ax.transAxes)
+
+
+        def clamp_lower(ax, min_val, axis="y"):
+            get, set_ = (ax.get_ylim, ax.set_ylim) \
+                        if axis == "y" else \
+                        (ax.get_xlim, ax.set_xlim)
+            lo, hi = get()
+            set_(max(lo, min_val), hi)
+
+        def clamp_run(ax):
+            ax.set_xlim(-0.05*t[-1], 1.05*t[-1])
+        def clamp_burn(ax):
+            ax.set_xlim(-0.05*Tburn, 1.05*Tburn)
+
+        def plot_callout(ax, y, col, pos=1.0, fmt="{:.2f}"):
+            ax.axhline(y, color=col, ls="--", lw=1)
+            ax.annotate(fmt.format(y), xy=(pos, y),
+                        xycoords=ax.get_yaxis_transform(), # x: axes frac, y: data
+                        ha="left" if pos >= 1.0 else "center", va="center",
+                        color=col, fontsize=10, fontweight="bold")
+        def plot_signal(ax, t, y, ycallout, col, pos=1.0, fmt="{:.2f}",
+                **plot_kw):
+            ax.plot(t, y, color=col, **plot_kw)
+            plot_callout(ax, ycallout, col, pos, fmt)
+
+        def tile_thrust(ax):
+            plot_signal(ax, t, traces["thrust"], np.nanmax(traces["thrust"]),
+                    PALETTE["amber"], pos=1.01, fmt="{:.2f} kN")
+            ax.set_title("thrust [kN]", fontweight="bold")
+            clamp_burn(ax)
+            clamp_lower(ax, 0.0)
+
+        def tile_isp(ax):
+            plot_signal(ax, t, traces["isp"], np.nanmax(traces["isp"]),
+                    PALETTE["pink"], pos=1.01, fmt="{:.1f} s")
+            ax.set_title("isp [s]", fontweight="bold")
+            clamp_burn(ax)
+            clamp_lower(ax, 0.0)
+
+        def tile_pressures(ax):
+            plot_signal(ax, t, traces["pressures"][0],
+                    np.nanmax(traces["pressures"][0]),
+                    PALETTE["blue"], pos=1.01, fmt="{:.1f} bar",
+                    label="tank")
+            plot_signal(ax, t, traces["pressures"][1],
+                    np.nanmax(traces["pressures"][1]),
+                    PALETTE["red"], pos=1.01, fmt="{:.1f} bar",
+                    label="cc")
+            ax.legend()
+            ax.set_title("pressures [bar]", fontweight="bold")
+            clamp_burn(ax)
+            clamp_lower(ax, 0.0)
+
+        def tile_stiffness(ax):
+            ax.plot(t, traces["stiffness"], color=PALETTE["teal"])
+            plot_callout(ax, traces["stiffness"][0],
+                    PALETTE["teal"], pos=1.01, fmt="{:.1f}%")
+            plot_callout(ax, np.nanmin(traces["stiffness"][:Nburn]),
+                    PALETTE["teal"], pos=1.01, fmt="{:.1f}%")
+            ax.set_title("stiffness [%]", fontweight="bold")
+            clamp_burn(ax)
+            ax.set_ylim(0.0, 50.0)
+
+        def tile_mfr(ax):
+            plot_signal(ax, t, traces["mfr"][0],
+                    np.nanmax(traces["mfr"][0]),
+                    PALETTE["blue"], pos=1.01, fmt="{:.2f} kg/s",
+                    label="ox")
+            plot_signal(ax, t, traces["mfr"][1],
+                    np.nanmax(traces["mfr"][1]),
+                    PALETTE["red"], pos=1.01, fmt="{:.2f} kg/s",
+                    label="fuel")
+            ax.legend()
+            ax.set_title("mfr [kg/s]", fontweight="bold")
+            clamp_burn(ax)
+            clamp_lower(ax, 0.0)
+
+        def tile_ofr(ax):
+            plot_signal(ax, t, traces["ofr"], traces["ofr"][:Nliq].sum() / Nliq,
+                    PALETTE["purple"], pos=1.01, fmt="{:.1f} s")
+            ax.set_title("ofr [-]", fontweight="bold")
+            clamp_burn(ax)
+            clamp_lower(ax, 0.0)
+
+        def clean_axes(ax):
+            ax.title.set_color("0.15")
+            ax.xaxis.label.set_color("0.15")
+            ax.yaxis.label.set_color("0.15")
+            ax.tick_params(colors="0.15") # tick marks + tick labels
+            for spine in ax.spines.values():
+                spine.set_color("0.15")
+
+            ax.grid(False, axis="both", which="both")
+            autminloc = matplotlib.ticker.AutoMinorLocator
+            ax.xaxis.set_minor_locator(autminloc())
+            ax.yaxis.set_minor_locator(autminloc())
+            ax.grid(True, axis="both", which="major", lw=1.0, ls="-", alpha=0.6)
+            ax.grid(True, axis="both", which="minor", lw=0.6, ls="--",
+                    alpha=0.35)
+
+        TILES = [
+            [tile_numbers],
+            [tile_thrust, tile_pressures, tile_mfr],
+            [tile_isp,    tile_stiffness, tile_ofr],
+        ]
+        HEIGHT_RATIOS = [0.22, 1, 0.7]
+
+        nrows, ncols = len(TILES), len(TILES[0])
+        fig = geez.new_figure(figsize=(12.0, 7.0), constrained_layout={
+            "w_pad": 0.1,
+            "h_pad": 0.1,
+            "wspace": 0.0,
+            "hspace": 0.1,
+        })
+        gs = fig.add_gridspec(len(TILES), 1, height_ratios=HEIGHT_RATIOS)
+        for r, row in enumerate(TILES):
+            if r == 0:
+                # Row 0 (tile_numbers) spans normally
+                sub = gs[r].subgridspec(1, len(row))
+                for c, tile in enumerate(row):
+                    ax = fig.add_subplot(sub[c])
+                    tile(ax)
+                    clean_axes(ax)
+            else:
+                # Rows 1 & 2: Add 3 active columns + 1 tiny empty padding column on the right
+                sub = gs[r].subgridspec(1, 4, width_ratios=[1, 1, 1, 0.08])
+                for c, tile in enumerate(row):
+                    ax = fig.add_subplot(sub[c])  # Only plot in columns 0, 1, and 2
+                    tile(ax)
+                    clean_axes(ax)
+                # Column 3 (sub[3]) is deliberately lef

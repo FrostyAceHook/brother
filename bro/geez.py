@@ -450,7 +450,10 @@ def no_window():
 
 
 def _post():
+    from matplotlib.layout_engine import ConstrainedLayoutEngine
     for fig in _figures.values():
+        if isinstance(fig.get_layout_engine(), ConstrainedLayoutEngine):
+            continue
         fig.tight_layout()
     to_remove = []
     for win in _windows:

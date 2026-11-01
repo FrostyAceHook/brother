@@ -39,6 +39,8 @@ def now_this_is_brother():
     if ret is not None:
         print("FAILED:", ret)
         return 1
+
+    intf.view(what="important")
     return 0
 
 

@@ -649,7 +649,7 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
     ss->M_exit = M_exit;
     ss->ofr = (burning) ? cc.ofr : NAN;
     ss->Isp = (cc.dm_out > 0.0) ? Thrust/cc.dm_out/STANDARD_GRAVITY : NAN;
-    ss->Thrust = Thrust;
+    ss->Thrust = (burning) ? Thrust : NAN;
     ss->Drag = Drag;
     ss->Gravity = Gravity;
 }
