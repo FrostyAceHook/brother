@@ -411,6 +411,9 @@ def snapshot_dtype():
 class Interface:
     SNAPSHOT_COUNT = 100_000
 
+    ROD_HEIGHT = 5 # [m] yes this is where this constant should live. he's happy
+                   # here.
+
     def __init__(self):
         # Create the bridging object.
         self.interp = bridge.Interpretation()
@@ -439,6 +442,9 @@ class Interface:
                 continue
             self.input_parsed(name, None)
 
+    def __getitem__(self, name):
+        return self.state[name]
+
     def input_direct(self, name, value):
         string = str(value)
         self.state[name] = value
@@ -466,17 +472,18 @@ class Interface:
         if ret is not None:
             raise RuntimeError(ret)
 
-    def view(self, what="important"):
-
+    def snapshots(self):
         # Extract from bridge as a flat numpy float array, then re-view numpy
         # array in correct dtype.
         snap_interp = params_grouped()["__snapshot_interp__"]
         dtype = snapshot_dtype()
-        array = self.state["snap_array"] \
-                .sized(self.state["snap_upto"] * len(snap_interp)) \
-                .view(dtype)
-        def number(name):
-            return self.state[name]
+        return self.state["snap_array"] \
+               .sized(self.state["snap_upto"] * len(snap_interp)) \
+               .view(dtype)
+
+
+    def view(self, what="important"):
+        array = self.snapshots()
         def trace(name):
             caster = params_snap_interp()[name].caster
             return (array[name] - caster.offset) / caster.scale
@@ -516,7 +523,6 @@ class Interface:
         #   Pr_inj
         #   mfr (ox/fuel)
         #   ofr
-        ROD_HEIGHT = 5 # [m]
 
         PALETTE = {
             "red":    "C3",
@@ -537,7 +543,7 @@ class Interface:
         tburn = t[min(Nburn, len(t) - 1)]
 
         def otr_velocity():
-            diff = array["alt_r"] - number("alt0_r") - ROD_HEIGHT
+            diff = array["alt_r"] - self["alt0_r"] - self.ROD_HEIGHT
             sign_changes = np.where(np.diff(np.signbit(diff)))[0]
             if sign_changes.size == 0:
                 return nan
@@ -554,7 +560,7 @@ class Interface:
             "impulse": (np.trapezoid(array["Thrust"][:Nburn], x=t[:Nburn]),
                         np.trapezoid(array["Thrust"][:Nliq], x=t[:Nliq])),
             "burn_time": (tburn, tliq),
-            "prop_masses": (number("m0_o"), number("m0_f")),
+            "prop_masses": (self["m0_o"], self["m0_f"]),
             "otr_velocity": otr_velocity(),
         }
         traces = {
@@ -591,8 +597,6 @@ class Interface:
                     f'{numbers["otr_velocity"]:.1f} m/s'
                 ),
             ]
-            # patch coords are axes fractions, and this axes is ~12x wider than tall,
-            # so isotropic (round-in-pixels) corners need mutation_aspect = w/h
             pos = ax.get_position()
             figw, figh = ax.figure.get_size_inches()
             aspect = (pos.width * figw) / (pos.height * figh)
@@ -625,7 +629,7 @@ class Interface:
         def plot_callout(ax, y, col, pos=1.0, fmt="{:.2f}"):
             ax.axhline(y, color=col, ls="--", lw=1)
             ax.annotate(fmt.format(y), xy=(pos, y),
-                        xycoords=ax.get_yaxis_transform(), # x: axes frac, y: data
+                        xycoords=ax.get_yaxis_transform(),
                         ha="left" if pos >= 1.0 else "center", va="center",
                         color=col, fontsize=10, fontweight="bold")
         def plot_signal(ax, t, y, ycallout, col, pos=1.0, fmt="{:.2f}",
