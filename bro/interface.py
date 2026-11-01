@@ -261,7 +261,6 @@ def params_grouped():
         "Combustion Chamber": [
             inp("etaCstar", "C* efficiency", Dimensioned.percent),
             inp("etaCf", "Cf efficiency", Dimensioned.percent),
-            inp("Vempty_c", "Empty volume", Dimensioned.L),
         ],
         "Fuel Grain": [
             inp("L0_f", "Length", Dimensioned.mm),
@@ -498,6 +497,7 @@ class Interface:
                 axes[j // 3, j % 3].set_title(label)
                 if (j // 3) == 1:
                     axes[j // 3, j % 3].set_xlabel("Time [s]")
+            return
 
         elif what != "important":
             assert False, f"unknown 'what': {what}"
@@ -528,11 +528,13 @@ class Interface:
             "maroon": "#8a0000",
         }
 
-        Nliq = np.argmax(array["m_l"] == 0)
-        Nburn = np.argmax(array["Thrust"] != array["Thrust"])
-        assert Nliq > 0
-        assert Nburn > 0
-        Tburn = t[Nburn]
+        idxof = lambda mask: next(iter(np.flatnonzero(mask)), mask.size)
+        Nliq = idxof(array["m_l"] == 0)
+        Ntank = idxof(array["P_t"] < 1.2e5)
+        Nburn = idxof(array["Thrust"] != array["Thrust"])
+        tliq = t[min(Nliq, len(t) - 1)]
+        ttank = t[min(Ntank, len(t) - 1)]
+        tburn = t[min(Nburn, len(t) - 1)]
 
         def otr_velocity():
             diff = array["alt_r"] - number("alt0_r") - ROD_HEIGHT
@@ -551,7 +553,7 @@ class Interface:
             "apogee": trace("alt_r")[-1],
             "impulse": (np.trapezoid(array["Thrust"][:Nburn], x=t[:Nburn]),
                         np.trapezoid(array["Thrust"][:Nliq], x=t[:Nliq])),
-            "burn_time": (t[Nburn], t[Nliq]),
+            "burn_time": (tburn, tliq),
             "prop_masses": (number("m0_o"), number("m0_f")),
             "otr_velocity": otr_velocity(),
         }
@@ -617,10 +619,8 @@ class Interface:
             lo, hi = get()
             set_(max(lo, min_val), hi)
 
-        def clamp_run(ax):
-            ax.set_xlim(-0.05*t[-1], 1.05*t[-1])
-        def clamp_burn(ax):
-            ax.set_xlim(-0.05*Tburn, 1.05*Tburn)
+        def clamp_to(ax, tmax):
+            ax.set_xlim(-0.05*tmax, 1.05*tmax)
 
         def plot_callout(ax, y, col, pos=1.0, fmt="{:.2f}"):
             ax.axhline(y, color=col, ls="--", lw=1)
@@ -637,59 +637,55 @@ class Interface:
             plot_signal(ax, t, traces["thrust"], np.nanmax(traces["thrust"]),
                     PALETTE["amber"], pos=1.01, fmt="{:.2f} kN")
             ax.set_title("thrust [kN]", fontweight="bold")
-            clamp_burn(ax)
+            clamp_to(ax, tburn)
             clamp_lower(ax, 0.0)
 
         def tile_isp(ax):
             plot_signal(ax, t, traces["isp"], np.nanmax(traces["isp"]),
                     PALETTE["pink"], pos=1.01, fmt="{:.1f} s")
             ax.set_title("isp [s]", fontweight="bold")
-            clamp_burn(ax)
+            clamp_to(ax, tburn)
             clamp_lower(ax, 0.0)
 
         def tile_pressures(ax):
             plot_signal(ax, t, traces["pressures"][0],
                     np.nanmax(traces["pressures"][0]),
-                    PALETTE["blue"], pos=1.01, fmt="{:.1f} bar",
-                    label="tank")
+                    PALETTE["blue"], pos=1.01, fmt="{:.1f} bar")
             plot_signal(ax, t, traces["pressures"][1],
                     np.nanmax(traces["pressures"][1]),
-                    PALETTE["red"], pos=1.01, fmt="{:.1f} bar",
-                    label="cc")
-            ax.legend()
+                    PALETTE["red"], pos=1.01, fmt="{:.1f} bar")
             ax.set_title("pressures [bar]", fontweight="bold")
-            clamp_burn(ax)
+            clamp_to(ax, tburn)
             clamp_lower(ax, 0.0)
 
         def tile_stiffness(ax):
             ax.plot(t, traces["stiffness"], color=PALETTE["teal"])
-            plot_callout(ax, traces["stiffness"][0],
+            callout0 = traces["stiffness"][0]
+            callout1 = np.nanmin(traces["stiffness"][:Nburn])
+            plot_callout(ax, callout0,
                     PALETTE["teal"], pos=1.01, fmt="{:.1f}%")
-            plot_callout(ax, np.nanmin(traces["stiffness"][:Nburn]),
+            plot_callout(ax, callout1,
                     PALETTE["teal"], pos=1.01, fmt="{:.1f}%")
             ax.set_title("stiffness [%]", fontweight="bold")
-            clamp_burn(ax)
-            ax.set_ylim(0.0, 50.0)
+            clamp_to(ax, tliq)
+            ax.set_ylim(0.0, max(50.0, 1.05*callout0, 1.05*callout1))
 
         def tile_mfr(ax):
             plot_signal(ax, t, traces["mfr"][0],
                     np.nanmax(traces["mfr"][0]),
-                    PALETTE["blue"], pos=1.01, fmt="{:.2f} kg/s",
-                    label="ox")
+                    PALETTE["blue"], pos=1.01, fmt="{:.2f} kg/s")
             plot_signal(ax, t, traces["mfr"][1],
                     np.nanmax(traces["mfr"][1]),
-                    PALETTE["red"], pos=1.01, fmt="{:.2f} kg/s",
-                    label="fuel")
-            ax.legend()
+                    PALETTE["red"], pos=1.01, fmt="{:.2f} kg/s")
             ax.set_title("mfr [kg/s]", fontweight="bold")
-            clamp_burn(ax)
+            clamp_to(ax, tburn)
             clamp_lower(ax, 0.0)
 
         def tile_ofr(ax):
             plot_signal(ax, t, traces["ofr"], traces["ofr"][:Nliq].sum() / Nliq,
-                    PALETTE["purple"], pos=1.01, fmt="{:.1f} s")
+                    PALETTE["purple"], pos=1.01, fmt="{:.2f}")
             ax.set_title("ofr [-]", fontweight="bold")
-            clamp_burn(ax)
+            clamp_to(ax, tburn)
             clamp_lower(ax, 0.0)
 
         def clean_axes(ax):
@@ -724,18 +720,8 @@ class Interface:
         })
         gs = fig.add_gridspec(len(TILES), 1, height_ratios=HEIGHT_RATIOS)
         for r, row in enumerate(TILES):
-            if r == 0:
-                # Row 0 (tile_numbers) spans normally
-                sub = gs[r].subgridspec(1, len(row))
-                for c, tile in enumerate(row):
-                    ax = fig.add_subplot(sub[c])
-                    tile(ax)
-                    clean_axes(ax)
-            else:
-                # Rows 1 & 2: Add 3 active columns + 1 tiny empty padding column on the right
-                sub = gs[r].subgridspec(1, 4, width_ratios=[1, 1, 1, 0.08])
-                for c, tile in enumerate(row):
-                    ax = fig.add_subplot(sub[c])  # Only plot in columns 0, 1, and 2
-                    tile(ax)
-                    clean_axes(ax)
-                # Column 3 (sub[3]) is deliberately lef
+            sub = gs[r].subgridspec(1, len(row))
+            for c, tile in enumerate(row):
+                ax = fig.add_subplot(sub[c])
+                tile(ax)
+                clean_axes(ax)

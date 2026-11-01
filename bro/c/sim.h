@@ -128,7 +128,6 @@ static_assert(sizeof(simSnapshot) == SIM_SNAPSHOT_N*sizeof(f64));
                                                                                 \
     X(etaCstar, f64, C_INPUT)                                                   \
     X(etaCf, f64, C_INPUT)                                                      \
-    X(Vempty_c, f64, C_INPUT)                                                   \
                                                                                 \
     X(L0_f, f64, C_INPUT)                                                       \
     X(OD0_f, f64, C_INPUT)                                                      \

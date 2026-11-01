@@ -22,14 +22,12 @@
 
 // Some (tweakable) system constants.
 
-static const f64 comb_Dt = 2.5e-3;
+static const f64 comb_Dt = 1.0e-3;
 static const f64 gotime_Dt = 50e-3;
 static const f64 comb_max_t = 50.0; // failsafe.
 static const f64 max_t = 1000.0; // failsafe.
-static const f64 negligible_m = 2e-3; // assume nothing if mass <= this.
-static const f64 comb_min_ofr = 2.0; // combustion extinguishes below.
-static const f64 comb_max_ofr = 15.0; // combustion extinguishes above.
-static const f64 min_peak_P_c = 5e5; // ballpark.
+static const f64 negligible_P = 1.2e5; // assume no tank pressure if P <= this.
+static const f64 negligible_m = 1e-3; // assume nothing if m <= this.
 
 
 
@@ -38,7 +36,7 @@ static const f64 min_peak_P_c = 5e5; // ballpark.
 // =========================================================================== //
 
 typedef struct simRunning { // time-dependant constantly-updating parameters.
-    i64 onfire;
+    i32 onfire;
     f64 t;
     f64 T_o;
     f64 m_o;
@@ -282,7 +280,6 @@ static void sim_initial(simState* s, simRunning* rn) {
 
     assert(0 < s->etaCstar && s->etaCstar <= 1, "etaCstar=%g", s->etaCstar);
     assert(0 < s->etaCf && s->etaCf <= 1, "etaCf=%g", s->etaCf);
-    /* Vempty_c checked later */
 
 
     assert(s->L0_f > 0, "L0_f=%g", s->L0_f);
@@ -345,9 +342,6 @@ static void sim_initial(simState* s, simRunning* rn) {
 
     // Waiting checks:
 
-    // Empty chamber volume must hold the grain with gas space to spare.
-    assert(s->Vempty_c > V0_f, "Vempty_c=%g, V0_f=%g", s->Vempty_c, V0_f);
-
     s->mwet0_r = s->mdry_r + s->m0_o + s->m0_f;
 
 
@@ -373,13 +367,16 @@ static void sim_initial(simState* s, simRunning* rn) {
 static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
         simSnapshot* ss /* may be null */) {
     // Unpack current state variables.
-    i64 onfire = rn->onfire;
-    f64 t     = rn->t;
+    i32 onfire = rn->onfire;
+    f64 t     = rn->t; (void)t; // not used lmao.
     f64 T_o   = rn->T_o;
     f64 m_o   = rn->m_o;
     f64 rr_f  = rn->rr_f;
     f64 alt_r = rn->alt_r;
     f64 vel_r = rn->vel_r;
+
+    // If sim is unstable, generally manifests as cooked tank properties.
+    assert(T_o > 0.0, "T_o=%f", T_o);
 
     // Ambient pressure changes with altitude.
     f64 P_a = amb_P(alt_r);
@@ -389,13 +386,6 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
     f64 Aneg_f = grain_Aneg(grain);
     f64 V_f = grain_V(grain, Aneg_f);
     f64 m_f = s->rho_f * V_f;
-
-
-    // If its still simming, somethings gone wrong.
-    assert(t < ((onfire) ? comb_max_t : max_t), "onfire=%lld", onfire);
-
-    // If sim is unstable, generally manifests as cooked tank properties.
-    assert(T_o > 0.0, "T_o=%f", T_o);
 
 
     // Tank state, and the cached injector flow state for it.
@@ -454,7 +444,7 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
         .s = s,
         .inj = (have_ox) ? &inj : NULL,
         .P_a = P_a,
-        .regressing = (onfire && m_f > 0.0), // Gotta be fire and fuel left.
+        .regressing = onfire,
         .Aneg_f = Aneg_f,
         .dm_per_drr = dm_per_drr,
     };
@@ -493,9 +483,6 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
         // poor combustion conditions, when the exhaust is very over-expanded and
         // the higher atmospheric pressure dominates.
         Thrust = max(Thrust, 0.0);
-
-        // Assume that combustion stops when ofr becomes too extreme.
-        onfire = within(cc.ofr, comb_min_ofr, comb_max_ofr);
     } else {
         // Assume no thrust without combustion (i.e. ignore any residual thrust
         // from still-pressurised tank/cc).
@@ -520,9 +507,8 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
 
     // Got all state time-dependant derivatives, lets pack it into the return
     // struct.
-    d_dt->onfire = onfire;
-    d_dt->t = 1; // extremely complex derivation, left as an exercise for
-                        // the reader.
+    d_dt->t = 1; // extremely complex derivation, left as an exercise for the
+                 // reader.
     d_dt->T_o   = dT_o;
     d_dt->m_o   = dm_o;
     d_dt->rr_f  = cc.drr_f;
@@ -560,15 +546,12 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
         }
     }
 
-    // Chamber gas: only meaningful while burning (rn->onfire is the state this
-    // evaluation ran in; `onfire` above may have just been switched off). It's
-    // the model's ideal gas (frozen Y, R, with C* efficiency in T), so the
+    // Chamber gas: ideal gas (frozen Y, R, with C* efficiency in T), so the
     // throat follows from isentropic relations at choke.
-    i32 burning = rn->onfire;
     f64 Y = cc.Y_c;
     f64 R = cc.R_c;
-    f64 T_cc = (burning) ? cc.T_c : NAN;
-    f64 P_cc = (burning) ? cc.P_c : NAN;
+    f64 T_cc = (onfire) ? cc.T_c : NAN;
+    f64 P_cc = (onfire) ? cc.P_c : NAN;
     f64 rho_cc = P_cc/R/T_cc; // TODO: add to relations
     f64 a_cc = sqrt(Y*R*T_cc); // TODO: ^
     f64 cv_g = R / (Y - 1.0);
@@ -579,7 +562,7 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
     f64 P_tht = NAN;
     f64 rho_tht = NAN;
     f64 a_tht = NAN;
-    if (burning) {
+    if (onfire) {
         T_tht   = T_cc   * isentropic_T_on_T0(1.0, shr);
         P_tht   = P_cc   * isentropic_P_on_P0(1.0, shr);
         rho_tht = rho_cc * isentropic_rho_on_rho0(1.0, shr);
@@ -592,7 +575,7 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
     f64 rho_exit = NAN;
     f64 a_exit = NAN;
     f64 M_exit = NAN;
-    if (burning) {
+    if (onfire) {
         // Use isentropic relations smile.
         f64 M = isentropic_sup_M(s->AEAT, shr);
         T_exit   = T_cc   * isentropic_T_on_T0(M, shr);
@@ -633,11 +616,11 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
     ss->T_cc = T_cc;
     ss->rho_cc = rho_cc;
     ss->a_cc = a_cc;
-    ss->Y_cc = (burning) ? Y : NAN;
-    ss->cp_cc = (burning) ? cv_g + R : NAN;
-    ss->cv_cc = (burning) ? cv_g : NAN;
-    ss->Mw_cc = (burning) ? GAS_CONSTANT / R : NAN;
-    ss->R_cc = (burning) ? R : NAN;
+    ss->Y_cc = (onfire) ? Y : NAN;
+    ss->cp_cc = (onfire) ? cv_g + R : NAN;
+    ss->cv_cc = (onfire) ? cv_g : NAN;
+    ss->Mw_cc = (onfire) ? GAS_CONSTANT / R : NAN;
+    ss->R_cc = (onfire) ? R : NAN;
     ss->T_tht = T_tht;
     ss->P_tht = P_tht;
     ss->rho_tht = rho_tht;
@@ -647,9 +630,9 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
     ss->rho_exit = rho_exit;
     ss->a_exit = a_exit;
     ss->M_exit = M_exit;
-    ss->ofr = (burning) ? cc.ofr : NAN;
+    ss->ofr = (onfire) ? cc.ofr : NAN;
     ss->Isp = (cc.dm_out > 0.0) ? Thrust/cc.dm_out/STANDARD_GRAVITY : NAN;
-    ss->Thrust = (burning) ? Thrust : NAN;
+    ss->Thrust = (onfire) ? Thrust : NAN;
     ss->Drag = Drag;
     ss->Gravity = Gravity;
 }
@@ -667,9 +650,17 @@ enum {
 static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     // Different time step sizes for different periods.
     f64 Dt = (rn->onfire) ? comb_Dt : gotime_Dt; // gotime.
+    f64 max_t = (rn->onfire) ? comb_max_t : max_t;
+    assert(rn->t < max_t, "t=%g, max_t=%g", rn->t, max_t);
 
     // Stop sim when combustion stops.
     i32 stop = (!rn->onfire);
+    // Don't stop if non-empty tank.
+    if (rn->m_o > 0) {
+        f64 rho_o = rn->m_o / s->V_t;
+        f64 P_t = N2O_P(rn->T_o, rho_o);
+        stop &= (P_t < negligible_P);
+    }
     // Unless not static fire, then also wait for travelling downwards.
     if (!s->static_fire)
         stop &= (rn->vel_r <= 0.0);
@@ -713,7 +704,6 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     simRunning* k2 = derivatives + 1;
     simRunning* k3 = derivatives + 2;
     simRunning* k4 = derivatives + 3;
-    f64 Donfire = (k1->onfire || k2->onfire || k3->onfire || k4->onfire);
     f64 dT_o   = (k1->T_o   + 2*k2->T_o   + 2*k3->T_o   + k4->T_o  ) / 6;
     f64 dm_o   = (k1->m_o   + 2*k2->m_o   + 2*k3->m_o   + k4->m_o  ) / 6;
     f64 drr_f  = (k1->rr_f  + 2*k2->rr_f  + 2*k3->rr_f  + k4->rr_f ) / 6;
@@ -721,7 +711,6 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     f64 dvel_r = (k1->vel_r + 2*k2->vel_r + 2*k3->vel_r + k4->vel_r) / 6;
 
     // Step me.
-    rn->onfire = Donfire;
     rn->t     = prev.t     + Dt;
     rn->T_o   = prev.T_o   + Dt * dT_o;
     rn->m_o   = prev.m_o   + Dt * dm_o;
@@ -738,15 +727,23 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
 
 
     // Collapse negligible masses to 0.
-    if (rn->m_o <= negligible_m)
-        rn->m_o = 0.0;
-    Grain* grain = get_grain(s, rn->rr_f);
+    if (rn->m_o <= negligible_m) {
+        rn->m_o = 0;
+        rn->onfire = 0;
+    }
+    Grain* grain = get_grain(s, rn->rr_f); // re-calc.
     if (s->rho_f * grain_V(grain, grain_Aneg(grain)) <= negligible_m) {
         rn->rr_f = grain_max_rr(grain);
         rn->onfire = 0;
-        // Note that this onfire culling outside sim_diff is kiiinda dodgy, but
-        // it kept having a trailing zero in the ofr without it and like she'll
-        // be right.
+    }
+
+
+    // Extinguish once tank pressure barely above ambient.
+    if (rn->m_o > 0 && rn->onfire) {
+        f64 rho_o = rn->m_o / s->V_t;
+        f64 P_t = N2O_P(rn->T_o, rho_o);
+        if (P_t < negligible_P)
+            rn->onfire = 0;
     }
 
 
