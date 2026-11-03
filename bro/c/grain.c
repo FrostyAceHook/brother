@@ -1,5 +1,6 @@
 #include "grain.h"
 
+#include "assertion.h"
 #include "geometry.h"
 #include "maths.h"
 

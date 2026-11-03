@@ -89,6 +89,8 @@ it was set to 0 before simming.
     X(Thrust)           \
     X(Drag)             \
     X(Gravity)          \
+    X(Cstar)            \
+    X(Cf)               \
 
 
 typedef struct simSnapshot {

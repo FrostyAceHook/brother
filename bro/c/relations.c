@@ -1,5 +1,6 @@
 #include "relations.h"
 
+#include "assertion.h"
 #include "maths.h"
 
 #include "cea.h"

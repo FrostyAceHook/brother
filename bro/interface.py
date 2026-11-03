@@ -384,6 +384,10 @@ def params_grouped():
                 Dimensioned.N),
             snap("Gravity", "Gravity force",
                 Dimensioned.N),
+            snap("Cstar", "Cstar",
+                Dimensioned.m_s),
+            snap("Cf", "Cf",
+                Dimensioned.none),
         ],
     }
 
@@ -423,15 +427,19 @@ class Interface:
         self.state = bridge.State(self.interp)
 
         # Setup snapshotting, first by hashing our interpretation.
-        snapshot_interp = bridge.Interpretation()
+        snap_interp = params_grouped()["__snapshot_interp__"]
+        snap_interp_obj = bridge.Interpretation()
         for p in params_grouped()["__snapshot_interp__"]:
-            snapshot_interp.append(p.c_name, p.c_type, p.c_flags)
-        snapshot_interp.finalise()
+            snap_interp_obj.append(p.c_name, p.c_type, p.c_flags)
+        snap_interp_obj.finalise()
+        snap_hash = snap_interp_obj.get_hash()
+        if snap_hash >= (1 << 63): # pack into signed 64b.
+            snap_hash -= (1 << 64)
         # `snap_upto` set before each run.
         self.state["snap_count"] = self.SNAPSHOT_COUNT
-        self.state["snap_hash"] = snapshot_interp.get_hash()
+        self.state["snap_hash"] = snap_hash
         self.state["snap_array"] = np.empty(
-            shape=(self.SNAPSHOT_COUNT * snapshot_dtype().itemsize,),
+            shape=(self.SNAPSHOT_COUNT * len(snap_interp),),
             dtype=np.float64,
         )
 
@@ -446,15 +454,12 @@ class Interface:
         return self.state[name]
 
     def input_direct(self, name, value):
-        string = str(value)
         self.state[name] = value
-        self.boxes[name] = string
-        # TODO: direct inputs of nan kinda break `boxes` contract a liiiiittle.
+        self.boxes[name] = None if value != value else \
+                           params()[name].caster.to_string(value)
     def input_parsed(self, name, string):
-        if string is None:
-            self.state[name] = nan
-        else:
-            self.state[name] = params()[name].caster.to_value(string)
+        self.state[name] = nan if string is None else \
+                           params()[name].caster.to_value(string)
         self.boxes[name] = string
 
     def save_json(self, path):
@@ -468,7 +473,12 @@ class Interface:
             self.input_parsed(name, string)
 
     def sim(self):
+        # Ensure that `either` parameters have the correct members nan-ed.
+        for name, value in self.boxes.items():
+            self.input_parsed(name, value)
+        # Reset output array pointer.
         self.state["snap_upto"] = 0
+        # Send to c.
         ret = self.state.execute()
         if ret is not None:
             raise RuntimeError(ret)
@@ -493,6 +503,7 @@ class Interface:
 
         if what == "all":
             # Plot each thing against time.
+            snap_interp = params_grouped()["__snapshot_interp__"]
             window = geez.new_window()
             for i in range(1, len(snap_interp)):
                 j = ((i - 1) % 6)

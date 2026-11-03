@@ -633,8 +633,8 @@ def _run():
     with timer("N2O"):
         gen_n2o_tables()
 
-    # with timer("CEA"):
-    #     gen_cea_tables()
+    with timer("CEA"):
+        gen_cea_tables()
 
 
 

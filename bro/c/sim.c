@@ -355,6 +355,7 @@ static void sim_initial(simState* s, simRunning* rn) {
     rn->alt_r = s->alt0_r; // launch altitude given.
     rn->vel_r = 0; // start stationary (dont model the onboard we sacrificed
                    // giving it a push).
+    rn->P_c_hint = NAN; // no hint initially.
 }
 
 
@@ -635,6 +636,8 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
     ss->Thrust = (onfire) ? Thrust : NAN;
     ss->Drag = Drag;
     ss->Gravity = Gravity;
+    ss->Cstar = (onfire) ? cc.P_c * s->A_tht / cc.dm_out : NAN;
+    ss->Cf = (onfire) ? Thrust / cc.P_c / s->A_tht : NAN;
 }
 
 
@@ -650,8 +653,8 @@ enum {
 static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     // Different time step sizes for different periods.
     f64 Dt = (rn->onfire) ? comb_Dt : gotime_Dt; // gotime.
-    f64 max_t = (rn->onfire) ? comb_max_t : max_t;
-    assert(rn->t < max_t, "t=%g, max_t=%g", rn->t, max_t);
+    f64 this_max_t = (rn->onfire) ? comb_max_t : max_t;
+    assert(rn->t < this_max_t, "t=%g, this_max_t=%g", rn->t, this_max_t);
 
     // Stop sim when combustion stops.
     i32 stop = (!rn->onfire);
@@ -749,7 +752,7 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
 
     // Output snapshot if requested.
     if (s->snap_count > 0) {
-        assert(s->snap_upto < s->snap_count, "snap_upto=%d, snap_count=%d",
+        assert(s->snap_upto < s->snap_count, "snap_upto=%lld, snap_count=%lld",
                 s->snap_upto, s->snap_count);
         memcpy(s->snap_array + s->snap_upto*SIM_SNAPSHOT_N, &snap, sizeof(snap));
         ++s->snap_upto;
