@@ -3,5 +3,5 @@
 
 // Rocket drag.
 
-f64 rocket_CD(f64 alt);
-f64 rocket_Drag(f64 alt, f64 vel, f64 A);
+f64 drag_CD(f64 alt);
+f64 drag_force(f64 alt, f64 vel, f64 A);

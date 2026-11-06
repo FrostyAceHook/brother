@@ -472,7 +472,7 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
 
 
 
-    // Do combustion things.
+    // Calc me thrust.
     f64 Thrust;
     if (onfire) {
         // Thrust from CEA, with back-pressure loss term and C* efficiency.
@@ -493,7 +493,7 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
 
 
     // Calculate drag force.
-    f64 Drag = rocket_Drag(alt_r, vel_r, s->A_r);
+    f64 Drag = drag_force(alt_r, vel_r, s->A_r);
 
     // Calculate weight force.
     f64 mwet_r = s->mdry_r + m_o + m_f;

@@ -6,47 +6,52 @@
 #include "ambient.h"
 
 
-// Rocket properties from structures for current cycle.
-// https://www.desmos.com/calculator/00d7pcn1ec
-#define ROCKET_CD_max_M (1.25)
+#define DRAG_TBL_Mmin (0.05)
+#define DRAG_TBL_Mmax (0.9 + 0.05*5)
+static const f64 DRAG_TBL_M[] = {
+    // Drag curve from structures for Ody V2 2026/11/06, clean model.
+    0.391603058,
+    0.357034263,
+    0.340667007,
+    0.333157043,
+    0.325230972,
+    0.302864458,
+    0.325845682,
+    0.321057597,
+    0.319039084,
+    0.316793308,
+    0.314393559,
+    0.313004018,
+    0.309672971,
+    0.308727786,
+    0.307576269,
+    0.306617945,
+    0.307402859,
+    0.308465884,
 
-f64 rocket_CD(f64 M) {
+    /* MADE UP TO NOT FAULT SIM AT EXTREMES: */
+    0.33,
+    0.36,
+    0.40,
+    0.42,
+    0.42, // flat forever.
+};
+
+
+f64 drag_CD(f64 M) {
+    // Use lookup table.
     assert(M >= 0.0, "M=%f", M);
-    assert(M <= ROCKET_CD_max_M, "M=%f", M);
-  #if 1
-    f64 n4 = -2.68015197546;
-    f64 n3 = +4.32516313836;
-    f64 n2 = -4.05555843745;
-    f64 n1 = +1.31009964679;
-    f64 n0 = +0.130126875872;
-    f64 d3 = +6.45904203456;
-    f64 d2 = -11.540104789;
-    f64 d1 = +4.86614101695;
-    f64 d0 = +0.289084735643;
-    return (n0 + M*(n1 + M*(n2 + M*(n3 + M*(n4 + /* 1.0* */M)))))
-         / (d0 + M*(d1 + M*(d2 + M*d3)));
-  #else
-    // https://www.desmos.com/calculator/f2mvcvsrd3
-    f64 n0 = -16.2988133908;
-    f64 n1 = -48.1659386797;
-    f64 n2 = +143.674493616;
-    f64 n3 = -80.1863491945;
-    f64 d0 = -35.0797586734;
-    f64 d1 = -193.441052967;
-    f64 d2 = +540.844019766;
-    f64 d3 = -370.66858712;
-    f64 d4 = +56.1759212259;
-    return (n0 + M*(n1 + M*(n2 + M*n3)))
-         / (d0 + M*(d1 + M*(d2 + M*(d3 + M*d4))));
-  #endif
+    f64 x = invlerp(DRAG_TBL_Mmin, DRAG_TBL_Mmax, M);
+    x *= numel(DRAG_TBL_M) - 1;
+    i32 i = min(max((i32)x, 0), numel(DRAG_TBL_M) - 2);
+    f64 t = x - i;
+    return lerp(DRAG_TBL_M[i], DRAG_TBL_M[i + 1], t);
 }
 
-f64 rocket_Drag(f64 alt, f64 vel, f64 A) {
-    if (alt > AMB_softmax_alt)
-        return 0.0;
+f64 drag_force(f64 alt, f64 vel, f64 A) {
     // Mach-dependant drag.
     f64 M = abs(vel) / amb_a(alt);
-    f64 CD = rocket_CD(M);
+    f64 CD = drag_CD(M);
     f64 Drag = CD * A * 0.5 * amb_rho(alt) * vel*vel;
     // "did you remember to make the drag negative?"
     if (vel > 0.0)
