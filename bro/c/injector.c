@@ -64,16 +64,16 @@ f64 hole_dm(const Hole* hole) {
 // Homogeneous-equilibrium exit state for an isentropic expansion from (s_u, h_u)
 // to saturation temperature T_d (pressure Psat(T_d)). Parametrising by T_d
 // rather than P_d avoids inverting Psat on every evaluation.
-typedef struct HemExit_ {
+typedef struct HemExit {
     f64 X;   // exit quality [-]
     f64 G;   // mass flux [kg/m^2/s] (0 if not in the dome or no enthalpy drop)
     f64 rho_l, rho_v; // exit saturated densities [kg/m^3]
-} HemExit_;
-static HemExit_ hem_exit_(f64 s_u, f64 h_u, f64 T_d) {
-    HemExit_ e;
+} HemExit;
+static HemExit hem_exit(f64 s_u, f64 h_u, f64 T_d) {
+    HemExit e;
     f64 s_l = N2O_satliq_s(T_d);
     f64 s_v = N2O_satvap_s(T_d);
-    e.X = (s_u - s_l) / (s_v - s_l);
+    e.X = invlerp(s_l, s_v, s_u);
     e.rho_l = N2O_satliq_rho(T_d);
     e.rho_v = N2O_satvap_rho(T_d);
     if (e.X <= 0.0) {
@@ -93,8 +93,8 @@ static HemExit_ hem_exit_(f64 s_u, f64 h_u, f64 T_d) {
 // FML blend weight: exit void fraction with Zivi slip S = (rho_l/rho_v)^(1/3),
 //  alpha = 1 / (1 + (1 - X)/X * S * rho_v/rho_l)
 //        = 1 / (1 + (1 - X)/X * (rho_v/rho_l)^(2/3)).
-static f64 get_k_FML(HemExit_ e) {
-    f64 r = pow(e.rho_v / e.rho_l, 2.0/3.0);
+static f64 get_k_FML(HemExit e) {
+    f64 r = cbrt(sqed(e.rho_v / e.rho_l));
     return 1.0 / (1.0 + (1.0 - e.X)/e.X * r);
 }
 
@@ -109,20 +109,20 @@ static f64 get_T_chokeHEM(f64 s_u, f64 h_u, f64 T_u) {
     const f64 g = 0.6180339887498949;
     f64 c = b - g*(b - a);
     f64 d = a + g*(b - a);
-    f64 Gc = hem_exit_(s_u, h_u, c).G;
-    f64 Gd = hem_exit_(s_u, h_u, d).G;
+    f64 Gc = hem_exit(s_u, h_u, c).G;
+    f64 Gd = hem_exit(s_u, h_u, d).G;
     while (b - a > 1e-5) { // [K]; ~30 iterations from a ~125 K bracket.
-        if (Gc > Gd) {
+        if (Gc >= Gd) {
             b = d; d = c; Gd = Gc;
             c = b - g*(b - a);
-            Gc = hem_exit_(s_u, h_u, c).G;
+            Gc = hem_exit(s_u, h_u, c).G;
         } else {
             a = c; c = d; Gc = Gd;
             d = a + g*(b - a);
-            Gd = hem_exit_(s_u, h_u, d).G;
+            Gd = hem_exit(s_u, h_u, d).G;
         }
     }
-    return 0.5*(a + b);
+    return a; // G(a) > 0 side; the midpoint can fall past the crossing.
 }
 
 HoleN2OU hole_N2OU(const HoleN2O* hole) {
@@ -185,7 +185,7 @@ HoleN2OU hole_N2OU(const HoleN2O* hole) {
                         ? T_d_sat_chokeHEM
                         : get_T_chokeHEM(up.s_u, up.h_u, T_u);
         up.P_d_chokeHEM = N2O_Psat(up.T_d_chokeHEM);
-        HemExit_ e = hem_exit_(up.s_u, up.h_u, up.T_d_chokeHEM);
+        HemExit e = hem_exit(up.s_u, up.h_u, up.T_d_chokeHEM);
         up.X_chokeHEM = e.X;
         up.dm_chokeHEM = up.CdA * e.G;
         up.k_chokeFML = (up.model == HOLE_N2O_FML && e.X > 0.0)
@@ -200,7 +200,7 @@ f64 hole_N2OU_dm(const HoleN2OU* up, f64 P_d) {
     if (up->P_u <= 0.0)
         return 0.0;
     f64 Prinv = P_d / up->P_u;
-    if (Prinv >= 0.99)
+    if (Prinv >= 0.999)
         return 0.0;
 
 
@@ -232,9 +232,9 @@ f64 hole_N2OU_dm(const HoleN2OU* up, f64 P_d) {
         k_FML = up->k_chokeFML;
     } else {
         i32 single_phase = (P_e >= N2O_Psat_hi);
-        HemExit_ e;
+        HemExit e = {0};
         if (!single_phase) {
-            e = hem_exit_(up->s_u, up->h_u, N2O_Tsat(P_e));
+            e = hem_exit(up->s_u, up->h_u, N2O_Tsat(P_e));
             single_phase = (e.X <= 0);
         }
         // Still single-phase (liquid) at the exit: SPC is the right answer.
@@ -255,7 +255,9 @@ f64 hole_N2OU_dm(const HoleN2OU* up, f64 P_d) {
     if (up->model == HOLE_N2O_DYER) {
         // Dyer/Solomon: kappa = sqrt((P_u - P_d) / (Psat(T_u) - P_d)),
         // k = 1/(1 + kappa). Uses the actual downstream pressure.
-        f64 kappa = sqrt((up->P_u - P_d) / (up->Psat_u - P_d));
+        f64 kappa = (up->Psat_u > P_d)
+                  ? sqrt((up->P_u - P_d) / (up->Psat_u - P_d))
+                  : INF;
         k = 1.0 / (1.0 + kappa);
     } else /* HOLE_N2O_FML */ {
         // At the same (choke-limited) exit state as the HEM term.

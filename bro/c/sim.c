@@ -43,13 +43,9 @@ typedef struct simRunning { // time-dependant constantly-updating parameters.
     f64 rr_f;
     f64 alt_r;
     f64 vel_r;
+
     f64 P_c_hint; // cc pressure solved each step, use prev as seed.
 } simRunning;
-
-typedef struct simPrev { // previous-tick values, for integration.
-    f64 Thrust;
-    f64 ofr;
-} simPrev;
 
 
 #define get_grain(args...) ( init_grain(&(Grain){0}, args) )
@@ -379,15 +375,6 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
     // If sim is unstable, generally manifests as cooked tank properties.
     assert(T_o > 0.0, "T_o=%f", T_o);
 
-    // Ambient pressure changes with altitude.
-    f64 P_a = amb_P(alt_r);
-
-    // Reconstruct some fuel state.
-    Grain* grain = get_grain(s, rr_f);
-    f64 Aneg_f = grain_Aneg(grain);
-    f64 V_f = grain_V(grain, Aneg_f);
-    f64 m_f = s->rho_f * V_f;
-
 
     // Tank state, and the cached injector flow state for it.
     f64 P_t = 0.0;
@@ -430,6 +417,12 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
     }
 
 
+    // Reconstruct some fuel state.
+    Grain* grain = get_grain(s, rr_f);
+    f64 Aneg_f = grain_Aneg(grain);
+    f64 V_f = grain_V(grain, Aneg_f);
+    f64 m_f = s->rho_f * V_f;
+
     // Fuel mass flow per unit regression rate [kg/m] = rho_f * burning area.
     // The grain functions are linear in the regression rate at fixed geometry,
     // so evaluate the mass flow [kg/s] at a reference rate [m/s] and divide it
@@ -439,6 +432,11 @@ static void sim_diff(simState* s, simRunning* rstr rn, simRunning* rstr d_dt,
                    * -grain_dV(grain, Aneg_f,
                                grain_dAneg(grain, Aneg_f, drr_f_ref))
                    / drr_f_ref;
+
+
+    // Ambient pressure changes with altitude.
+    f64 P_a = amb_P(alt_r);
+
 
     // Chamber: quasi-steady mass balance while burning, else ambient.
     CCctx cc_ctx = {
@@ -656,6 +654,7 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
     f64 this_max_t = (rn->onfire) ? comb_max_t : max_t;
     assert(rn->t < this_max_t, "t=%g, this_max_t=%g", rn->t, this_max_t);
 
+
     // Stop sim when combustion stops.
     i32 stop = (!rn->onfire);
     // Don't stop if non-empty tank.
@@ -669,6 +668,7 @@ static __attribute((__hot__)) i32 sim_ulate(simState* s, simRunning* rn) {
         stop &= (rn->vel_r <= 0.0);
     if (stop)
         return SIM_STOP;
+
 
     // Fill out snapshot if needed.
     simSnapshot snap;

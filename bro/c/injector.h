@@ -47,7 +47,6 @@ enum {
 typedef struct HoleN2O {
     i32 model; // =`HOLE_N2O_*`
     f64 CdA;
-    f64 A;
     f64 P_u; // stagnation.
     f64 P_d;
     f64 T_u; // stagnation.

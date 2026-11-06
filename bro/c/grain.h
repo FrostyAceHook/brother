@@ -20,9 +20,3 @@ f64 grain_Aneg(const Grain* grain);
 f64 grain_dAneg(const Grain* grain, f64 Aneg, f64 drr);
 f64 grain_V(const Grain* grain, f64 Aneg);
 f64 grain_dV(const Grain* grain, f64 Aneg, f64 dAneg);
-
-void grain_radial_contour(const Grain* grain, i32 count, f64* rstr xs,
-        f64* rstr ys);
-
-void grain_axial_contour(const Grain* grain, f64 x0, i32 count,
-        f64* rstr xs, f64* rstr ys);
