@@ -29,7 +29,7 @@ class Rocket(System):
         intf.input_direct("V_t", self.V_t)
         intf.input_direct("vff0_l", float("nan"))
         intf.input_direct("m0_o", (self.V_t/11e-3)
-                                  * 9.100114194284641) # 11L 14dC satliq fill.
+                                  * 8.799545319460602) # 11L 18dC satliq fill.
         intf.input_direct("T0_o", self.T0_o)
         intf.input_direct("Cd_inj", self.Cd_inj)
         intf.input_direct("etaCstar", self.etaCstar)
@@ -75,31 +75,30 @@ class Rocket(System):
 
     # --- outputs (sim results) ---
     apogee = calc(u.kft, lambda s: s.god["apogee"])
-    peak_thrust = calc(u.kN, lambda s: s.god["peak_thrust"])
     impulse = calc(u.kNs, lambda s: s.god["impulse"])
-    min_stiffness = calc(u.percent, lambda s: s.god["min_stiffness"])
+    peak_thrust = calc(u.kN, lambda s: s.god["peak_thrust"])
     otr_velocity = calc(u.m_s, lambda s: s.god["otr_velocity"])
-
-
+    min_stiffness = calc(u.percent, lambda s: s.god["min_stiffness"])
 
     # --- tolerances ---
     def tolerances(s):
         return dict(
-            V_t=0.08,
-            T0_o=(s.T0_o, s.T0_o + 2.5),
+            V_t=0.1,
+            T0_o=(s.T0_o - 2.5, s.T0_o + 2.5),
             Cd_inj=0.18,
             etaCstar=0.12,
         )
     worst_apogee = calc(u.kft,
         lambda s: search.corners(s, "apogee", s.tolerances()).value)
-    worst_peak_thrust = calc(u.kN,
-        lambda s: search.corners(s, "peak_thrust", s.tolerances()).value)
     worst_impulse = calc(u.kNs,
         lambda s: search.corners(s, "impulse", s.tolerances()).value)
-    worst_min_stiffness = calc(u.percent,
-        lambda s: search.corners(s, "min_stiffness", s.tolerances()).value)
+    worst_peak_thrust = calc(u.kN,
+        lambda s: search.corners(s, "peak_thrust", s.tolerances(), worst="max")
+                        .value)
     worst_otr_velocity = calc(u.m_s,
         lambda s: search.corners(s, "otr_velocity", s.tolerances()).value)
+    worst_min_stiffness = calc(u.percent,
+        lambda s: search.corners(s, "min_stiffness", s.tolerances()).value)
 
 
     def plot(self):
@@ -111,7 +110,7 @@ class Rocket(System):
 def check_candidate():
     rocket = Rocket(
         V_t=11.0e-3,
-        T0_o=273.15 + 14,
+        T0_o=273.15 + 18,
         Cd_inj=0.65,
         etaCstar=0.75,
         Deq_injo=10e-3,
@@ -124,20 +123,21 @@ def check_candidate():
     print("===== SENSITIVITY =====")
     sens = search.sensitivity(rocket, [
         "apogee",
-        "peak_thrust",
         "impulse",
-        "min_stiffness",
+        "peak_thrust",
         "otr_velocity",
+        "min_stiffness",
     ], ["V_t", "T0_o", "Cd_inj", "etaCstar", "Deq_injo", "D_tht"])
     sens.report()
     print()
 
     print("===== TOLERANCES =====")
     tol = rocket.tolerances()
-    for metric in ["apogee", "peak_thrust", "impulse", "min_stiffness",
-            "otr_velocity"]:
+    for metric in ["apogee", "impulse", "peak_thrust", "otr_velocity",
+            "min_stiffness"]:
         print()
-        search.corners(rocket, metric, tol, worst="min").report()
+        search.corners(rocket, metric, tol,
+                worst="max" if metric == "peak_thrust" else "min").report()
 
 
     """>> cheeky output dump:
@@ -145,82 +145,81 @@ def check_candidate():
 Rocket
  (- dependent)
     V_t               0.011
-    T0_o              14 °C
+    T0_o              18 °C
     Cd_inj            0.65
     etaCstar          0.75
     Deq_injo          10 mm
     D_tht             36 mm
-  - deity             <bro.interface.Interface object at 0x0000024255F77A10>
+  - deity             <bro.interface.Interface object at 0x00000209F34378C0>
   - god               ??
-  - apogee            13.23 kft
-  - peak_thrust       4.005 kN
-  - impulse           16.25 kNs
-  - min_stiffness     33.19 %
-  - otr_velocity      25.59 m/s
-  - worst_apogee      8.57 kft
-  - worst_peak_thrust  3.163 kN
-  - worst_impulse     12.77 kNs
-  - worst_min_stiffness  17.87 %
-  - worst_otr_velocity  22.15 m/s
+  - apogee            12.2 kft
+  - impulse           15.67 kNs
+  - peak_thrust       4.211 kN
+  - otr_velocity      26.43 m/s
+  - min_stiffness     36.76 %
+  - worst_apogee      7.657 kft
+  - worst_impulse     12.04 kNs
+  - worst_peak_thrust  6.523 kN
+  - worst_otr_velocity  22.4 m/s
+  - worst_min_stiffness  18.81 %
 
 ===== SENSITIVITY =====
 Sensitivity (% change in metric per % change in param):
-  param     apogee  peak_thrust  impulse  min_stiffness  otr_velocity
+  param     apogee  impulse  peak_thrust  otr_velocity  min_stiffness
   -------------------------------------------------------------------
-  V_t       +1.560       +0.000   +1.012         -0.055        -0.092
-  T0_o      +0.325      +22.420   +0.017         +4.643        +1.713
-  Cd_inj    +0.155       +0.646   +0.050         -1.799        +0.367
-  etaCstar  +1.967       +0.679   +1.119         -1.949        +0.386
-  Deq_injo  +0.312       +1.291   +0.110         -3.622        +0.733
-  D_tht     -0.314       +0.643   -0.224         +3.893        +0.379
+  V_t       +1.530   +1.005       -0.000        -0.089         -0.037
+  T0_o      +0.213   -0.029      +20.423        +1.489         +4.621
+  Cd_inj    +0.149   +0.050       +0.674        +0.379         -1.761
+  etaCstar  +1.931   +1.121       +0.718        +0.404         -1.910
+  Deq_injo  +0.296   +0.109       +1.349        +0.759         -3.546
+  D_tht     -0.336   -0.232       +0.565        +0.334         +3.818
 
 ===== TOLERANCES =====
 
 Worst-case (min) apogee:
-  nominal  13.23 kft
-  worst    8.57 kft
+  nominal  12.2 kft
+  worst    7.657 kft
   at:
-    V_t               0.01012
-    T0_o              14 °C
-    Cd_inj            0.533
-    etaCstar          0.66
-
-Worst-case (min) peak_thrust:
-  nominal  4.005 kN
-  worst    3.163 kN
-  at:
-    V_t               0.01012
-    T0_o              14 °C
+    V_t               0.0099
+    T0_o              15.5 °C
     Cd_inj            0.533
     etaCstar          0.66
 
 Worst-case (min) impulse:
-  nominal  16.25 kNs
-  worst    12.77 kNs
+  nominal  15.67 kNs
+  worst    12.04 kNs
   at:
-    V_t               0.01012
-    T0_o              14 °C
+    V_t               0.0099
+    T0_o              20.5 °C
     Cd_inj            0.533
     etaCstar          0.66
 
-Worst-case (min) min_stiffness:
-  nominal  33.19 %
-  worst    17.87 %
+Worst-case (max) peak_thrust:
+  nominal  4.211 kN
+  worst    6.523 kN
   at:
-    V_t               0.01188
-    T0_o              14 °C
+    V_t               0.0121
+    T0_o              20.5 °C
     Cd_inj            0.767
     etaCstar          0.84
 
 Worst-case (min) otr_velocity:
-  nominal  25.59 m/s
-  worst    22.15 m/s
+  nominal  26.43 m/s
+  worst    22.4 m/s
   at:
-    V_t               0.01188
-    T0_o              14 °C
+    V_t               0.0121
+    T0_o              15.5 °C
     Cd_inj            0.533
     etaCstar          0.66
 
+Worst-case (min) min_stiffness:
+  nominal  36.76 %
+  worst    18.81 %
+  at:
+    V_t               0.0121
+    T0_o              15.5 °C
+    Cd_inj            0.767
+    etaCstar          0.84
     """
 
 
@@ -229,36 +228,37 @@ def search_space():
     import matplotlib.pyplot as plt
 
     rocket = Rocket(
-        T0_o=273.15 + 14,
+        V_t=11.0e-3,
+        T0_o=273.15 + 18,
         Cd_inj=0.65,
-        Deq_injo=14.0e-3,
         etaCstar=0.75,
+        Deq_injo=14e-3,
         D_tht=36e-3,
     )
     all_metrics = [
         "apogee",
         "worst_apogee",
-        "peak_thrust",
-        "worst_peak_thrust",
         "impulse",
         "worst_impulse",
-        "min_stiffness",
-        "worst_min_stiffness",
+        "peak_thrust",
+        "worst_peak_thrust",
         "otr_velocity",
         "worst_otr_velocity",
-    ]
-    metrics = [
-        "min_stiffness",
-        "apogee",
-        "otr_velocity",
-    ]
-    metrics_plusworst = [
         "min_stiffness",
         "worst_min_stiffness",
+    ]
+    metrics = [
+        "apogee",
+        "otr_velocity",
+        "min_stiffness",
+    ]
+    metrics_plusworst = [
         "apogee",
         "worst_apogee",
         "otr_velocity",
         "worst_otr_velocity",
+        "min_stiffness",
+        "worst_min_stiffness",
     ]
 
 
@@ -303,16 +303,16 @@ def search_space():
     opt = search.optimise(rocket, "apogee",
             params={"D_tht": (28e-3, 44e-3),
                     "Deq_injo": (9e-3, 16e-3)},
-            constraints={"min_stiffness": (0.3, None),
-                         "otr_velocity": (28.0, None)},
+            constraints={"otr_velocity": (25.0, None),
+                         "min_stiffness": (0.3, None)},
             maximise=True, seed=0, maxiter=20, popsize=8)
     opt.report()
 
     # does the optimum survive tolerances?
     print()
     tol = opt.system.tolerances()
-    search.corners(opt.system, "min_stiffness", tol, worst="min").report()
     search.corners(opt.system, "otr_velocity", tol, worst="min").report()
+    search.corners(opt.system, "min_stiffness", tol, worst="min").report()
 
     plt.show()
 
